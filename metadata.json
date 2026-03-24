@@ -1,0 +1,5 @@
+{
+  "name": "LevarG",
+  "description": "Vulnerability Research Platform for reconnaissance, request replay, and state-based flow analysis.",
+  "requestFramePermissions": []
+}
