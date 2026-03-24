@@ -373,11 +373,18 @@ export class AutomationEngine {
 
         const browser = await puppeteer.launch({ 
           headless: true, 
+          executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome',
           args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox',
             '--disable-blink-features=AutomationControlled'
           ] 
+        }).catch(async () => {
+          // Fallback to default if /usr/bin/google-chrome doesn't exist
+          return await puppeteer.launch({
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+          });
         });
         
         try {
