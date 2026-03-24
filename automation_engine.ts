@@ -398,13 +398,56 @@ export class AutomationEngine {
                     url: new URL(f.action || window.location.href, window.location.origin).href,
                     method: (f.method || 'GET').toUpperCase()
                   }));
-                  return [...links, ...forms];
+                  const scripts = Array.from(document.querySelectorAll('script')).map(s => s.src).filter(src => src);
+                  return { links, forms, scripts };
                 } catch (e) {
-                  return [];
+                  return { links: [], forms: [], scripts: [] };
                 }
-              }).catch(() => []);
+              }).catch(() => ({ links: [], forms: [], scripts: [] }));
               
-              // 2. Regex-based Link Extraction (for JS/Source)
+              endpoints.push(...domEndpoints.links, ...domEndpoints.forms);
+
+              // 2. JS Secret Mining & Endpoint Extraction
+              for (const scriptUrl of domEndpoints.scripts) {
+                try {
+                  const jsRes = await axios.get(scriptUrl, { timeout: 5000, validateStatus: () => true });
+                  if (jsRes.status === 200 && typeof jsRes.data === 'string') {
+                    const jsContent = jsRes.data;
+                    
+                    // Extract hidden endpoints from JS
+                    const hiddenPaths = jsContent.match(/(?:"|')(\/[a-zA-Z0-9\/\._\-\?\&]+)(?:"|')/g) || [];
+                    hiddenPaths.forEach(p => {
+                      const path = p.replace(/["']/g, '');
+                      if (path.length > 2) endpoints.push({ url: new URL(path, asset).href, method: 'GET' });
+                    });
+
+                    // Search for secrets in JS
+                    if (ai) {
+                      const secretPrompt = `Analyze this JavaScript file content for hardcoded secrets, API keys, or sensitive internal endpoints.
+                      URL: ${scriptUrl}
+                      Content Snippet: ${jsContent.substring(0, 5000)}
+                      
+                      Return JSON: { "found": boolean, "secrets": string[], "explanation": string }`;
+                      
+                      const secretRes = await ai.models.generateContent({
+                        model: 'gemini-3.1-pro-preview',
+                        contents: secretPrompt,
+                        config: { responseMimeType: 'application/json' }
+                      });
+                      
+                      if (secretRes.text) {
+                        const analysis = JSON.parse(secretRes.text);
+                        if (analysis.found) {
+                          this.log(jobId, 'vuln', `SECRET DISCOVERED IN JS: ${scriptUrl}`, { secrets: analysis.secrets, explanation: analysis.explanation });
+                          MemoryManager.addFinding(jobId, hostname, { type: 'Hardcoded Secret', asset: scriptUrl, gap: 'Sensitive data in client-side JS', details: analysis.explanation });
+                        }
+                      }
+                    }
+                  }
+                } catch (e) {}
+              }
+              
+              // 3. Regex-based Link Extraction (for JS/Source)
               const bodyContent = await page.content().catch(() => '');
               const regexLinks = bodyContent.match(/(?:"|')(\/[a-zA-Z0-9\/\._\-\?\&]+)(?:"|')/g) || [];
               const parsedRegexLinks = regexLinks.map(l => {
@@ -414,7 +457,7 @@ export class AutomationEngine {
                 } catch(e) { return null; }
               }).filter(l => l !== null) as {url: string, method: string}[];
 
-              endpoints.push(...domEndpoints, ...parsedRegexLinks);
+              endpoints.push(...parsedRegexLinks);
               
               // 3. Robots.txt Parsing
               try {
@@ -452,7 +495,8 @@ export class AutomationEngine {
         this.log(jobId, 'info', 'Strategy 2: Multi-Asset Content Discovery (ffuf polyfill)');
         const commonDirs = [
           'admin', 'api', 'v1', 'v2', 'graphql', 'config', 'login', 'dashboard', 'debug', 'internal', 'metrics', '.env', 'phpinfo',
-          'api/auth/login', 'api/auth/google', 'api/auth/session', 'api/users/me', 'api/teams', 'api/projects', 'api/files'
+          'api/auth/login', 'api/auth/google', 'api/auth/session', 'api/users/me', 'api/teams', 'api/projects', 'api/files',
+          '.git/config', '.git/HEAD', '.env', '.vscode/sftp.json', '.well-known/security.txt', 'sitemap.xml'
         ];
         
         for (const asset of discoveredAssets.slice(0, 5)) {
@@ -570,6 +614,19 @@ export class AutomationEngine {
 
         // 4. Generic Vulnerability Fuzzing (SQLi, XSS, etc.)
         const vulnerabilities: any[] = [];
+        
+        // --- STACK GAP ANALYSIS (Adversary Simulation) ---
+        this.log(jobId, 'info', 'Strategy 3: Stack Gap Analysis (WAF/Proxy Smuggling)');
+        for (const asset of discoveredAssets.slice(0, 3)) {
+          try {
+            const gaps = await StackGapAnalyzer.analyze(asset);
+            if (gaps.length > 0) {
+              this.log(jobId, 'vuln', `STACK GAP IDENTIFIED on ${asset}`, { gaps });
+              allFindings.push({ phase: 'Phase 4', type: 'Stack Gap Findings', asset, data: gaps });
+            }
+          } catch (e) {}
+        }
+
         const highValueEndpoints = endpoints.filter(e => 
           e.url.includes('api') || e.url.includes('admin') || e.url.includes('auth') || e.url.includes('?') || e.url.includes('login')
         ).slice(0, 50); // Increased depth

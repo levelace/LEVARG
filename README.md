@@ -1,20 +1,32 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# LevarG (LEVELACE SENTINEL LLC) — Local Setup Guide
 
-# Run and deploy your AI Studio app
+If you are seeing `npm install` errors on Windows related to `better-sqlite3` or `node-gyp`, follow these steps:
 
-This contains everything you need to run your app locally.
+## 0x00 — The Problem
+You are likely using **Node.js v25.x** or a non-LTS version. Native modules like `better-sqlite3` require prebuilt binaries that are often not available for bleeding-edge Node versions on Windows, forcing a local C++ compilation which requires Visual Studio.
 
-View your app in AI Studio: https://ai.studio/apps/d0e36c0f-9a6d-4544-a3a7-5da59a910890
+## 0x01 — The Fix (Recommended)
+1.  **Install Node.js 20.x (LTS):** This is the most stable version for security tooling.
+2.  **Use NVM:** If you have [nvm-windows](https://github.com/coreybutler/nvm-windows) installed:
+    ```powershell
+    nvm install 20
+    nvm use 20
+    ```
+3.  **Clean Install:**
+    ```powershell
+    rm -rf node_modules
+    npm install
+    ```
 
-## Run Locally
+## 0x02 — The Fix (Alternative: Build Tools)
+If you must use Node 25, you need the C++ build environment:
+1.  Open PowerShell as Administrator.
+2.  Run: `npm install --global windows-build-tools` (or install "Desktop development with C++" via Visual Studio Installer).
 
-**Prerequisites:**  Node.js
+## 0x03 — Running the App
+```powershell
+npm run dev
+```
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+---
+*LEVELACE SENTINEL LLC — Handle: argila | HackerOne | Social: JUSCLICK-TEQIQ*

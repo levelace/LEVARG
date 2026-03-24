@@ -104,27 +104,28 @@ export default function Methodology() {
     },
     {
       number: 3,
-      title: "Discovery",
+      title: "Discovery & Mining",
       icon: <Zap className="w-5 h-5" />,
       color: "orange",
       items: [
         { label: "Map the App Logic", description: "Crawl as user/guest; Analyze workflows & APIs." },
+        { label: "JS Secret Mining", description: "Deep-scan JS files for hardcoded keys, internal endpoints, and dev flags." },
         { label: "Parameter Fuzzing", description: "Use Ffuf/Dirb/Wfuzz to find hidden endpoints & parameters." },
         { label: "Auth Testing", description: "Test for Broken Auth, MFA bypass, Session Hijacking." },
-        { label: "Input Validation", description: "Test: SQLi, XSS, SSRF, RCE, IDOR, LFI/RFI." },
-        { label: "Logic Flaw Identification", description: "Abuse business logic, e.g., shopping cart, payment flow." }
+        { label: "Input Validation", description: "Test: SQLi, XSS, SSRF, RCE, IDOR, LFI/RFI." }
       ]
     },
     {
       number: 4,
-      title: "Exploitation & PoC",
+      title: "Adversary Simulation",
       icon: <ShieldAlert className="w-5 h-5" />,
       color: "pink",
       items: [
+        { label: "Stack Gap Analysis", description: "Identify differences in WAF vs Proxy vs Backend handling." },
+        { label: "Request Smuggling", description: "Test for CL.TE, TE.CL, and TE.TE smuggling primitives." },
         { label: "Manual Exploitation", description: "Craft exploit; use Burp Suite for manipulation." },
-        { label: "Document Impact", description: "Clearly demonstrate consequence, e.g., data loss or access." },
         { label: "Chaining Bugs", description: "Chain multiple low-severity issues into high/critical impact." },
-        { label: "Confirm Reproducibility", description: "Ensure the vulnerability is easy to reproduce." }
+        { label: "Document Impact", description: "Clearly demonstrate consequence, e.g., data loss or access." }
       ]
     },
     {
