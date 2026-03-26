@@ -16,15 +16,6 @@ async function startServer() {
 
   app.use(cors());
   app.use(express.json());
-  
-  // Seed figma.com scope
-  try {
-    const existing = db.prepare('SELECT * FROM scopes WHERE domain = ?').get('figma.com');
-    if (!existing) {
-      db.prepare('INSERT INTO scopes (id, domain) VALUES (?, ?)').run(uuidv4(), 'figma.com');
-      console.log('[Seed] Added figma.com to scopes');
-    }
-  } catch (e) {}
 
   // Request logging middleware
   app.use((req, res, next) => {
@@ -401,15 +392,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`LevarG Server running on http://localhost:${PORT}`);
-    
-    // Trigger figma.com scan on startup
-    console.log('[Startup] Initiating autonomous hunt on https://figma.com and https://blog.figma.com');
-    AutomationEngine.startJob('https://figma.com').catch(err => {
-      console.error('[Startup] Failed to start figma.com scan:', err);
-    });
-    AutomationEngine.startJob('https://blog.figma.com').catch(err => {
-      console.error('[Startup] Failed to start blog.figma.com scan:', err);
-    });
+    // FIX: Removed hardcoded Figma startup scans — scans should only be triggered by user action
   });
 }
 
