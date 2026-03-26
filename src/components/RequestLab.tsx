@@ -54,7 +54,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
       status: item.status,
       headers: item.res_headers ? JSON.parse(item.res_headers) : {},
       body: item.res_body,
-      duration: 0 // Not stored in history currently
+      duration: 0
     });
     setAiAnalysis(null);
   };
@@ -92,7 +92,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
     if (!response) return;
     setAnalyzing(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
       const prompt = `Analyze this HTTP response for potential security vulnerabilities. 
       Focus on:
       1. Missing security headers
@@ -106,7 +106,8 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
       Body: ${typeof response.body === 'string' ? response.body.substring(0, 5000) : JSON.stringify(response.body).substring(0, 5000)}`;
       
       const aiResponse = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        // FIX: was 'gemini-3-flash-preview' which is an invalid model string
+        model: 'gemini-1.5-flash',
         contents: prompt,
       });
       
