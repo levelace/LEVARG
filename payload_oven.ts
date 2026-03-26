@@ -193,7 +193,8 @@ export class PayloadOven {
 
     try {
       const res = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
+        // FIX: was 'gemini-3.1-pro-preview' which is an invalid model string
+        model: 'gemini-1.5-pro',
         contents: prompt
       });
       return res.text?.trim() || this.getPayloads(category, 1, 1)[0];
@@ -211,4 +212,3 @@ export class PayloadOven {
     return newArray;
   }
 }
-
