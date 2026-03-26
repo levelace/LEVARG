@@ -135,7 +135,7 @@ export class AutomationEngine {
           Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
           const analysisRes = await ai.models.generateContent({
-            model: 'gemini-3.1-pro-preview',
+            model: 'gemini-1.5-pro',
             contents: analysisPrompt,
             config: { responseMimeType: 'application/json' }
           });
@@ -202,7 +202,7 @@ export class AutomationEngine {
             Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "discovered_user": string | null, "chain_potential": string | null }`;
 
             const analysisRes = await ai.models.generateContent({
-              model: 'gemini-3.1-pro-preview',
+              model: 'gemini-1.5-pro',
               contents: analysisPrompt,
               config: { responseMimeType: 'application/json' }
             });
@@ -255,7 +255,7 @@ export class AutomationEngine {
             Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
             const analysisRes = await ai.models.generateContent({
-              model: 'gemini-3.1-pro-preview',
+              model: 'gemini-1.5-pro',
               contents: analysisPrompt,
               config: { responseMimeType: 'application/json' }
             });
@@ -437,7 +437,7 @@ export class AutomationEngine {
                       Return JSON: { "found": boolean, "secrets": string[], "explanation": string }`;
                       
                       const secretRes = await ai.models.generateContent({
-                        model: 'gemini-3.1-pro-preview',
+                        model: 'gemini-1.5-pro',
                         contents: secretPrompt,
                         config: { responseMimeType: 'application/json' }
                       });
@@ -580,7 +580,7 @@ export class AutomationEngine {
               Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
               const analysisRes = await ai.models.generateContent({
-                model: 'gemini-3.1-pro-preview',
+                model: 'gemini-1.5-pro',
                 contents: analysisPrompt,
                 config: { responseMimeType: 'application/json' }
               });
@@ -662,7 +662,7 @@ export class AutomationEngine {
                     Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
                     const analysisRes = await ai.models.generateContent({
-                      model: 'gemini-3.1-pro-preview',
+                      model: 'gemini-1.5-pro',
                       contents: analysisPrompt,
                       config: { responseMimeType: 'application/json' }
                     });
@@ -730,7 +730,7 @@ export class AutomationEngine {
                 Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
                 const analysisRes = await ai.models.generateContent({
-                  model: 'gemini-3.1-pro-preview',
+                  model: 'gemini-1.5-pro',
                   contents: analysisPrompt,
                   config: { responseMimeType: 'application/json' }
                 });
@@ -764,7 +764,7 @@ export class AutomationEngine {
           
           try {
             const pocRes = await ai.models.generateContent({
-              model: 'gemini-3.1-pro-preview',
+              model: 'gemini-1.5-pro',
               contents: pocPrompt,
               config: { responseMimeType: 'application/json' }
             });
