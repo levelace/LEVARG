@@ -7,6 +7,7 @@ export default function AutomationDashboard() {
   const [selectedJob, setSelectedJob] = useState<any>(null);
   const [logs, setLogs] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [logFilter, setLogFilter] = useState<'all' | 'info' | 'warn' | 'vuln'>('all');
   const [error, setError] = useState('');
 
   const fetchJobs = async () => {
@@ -133,7 +134,8 @@ export default function AutomationDashboard() {
   };
 
   return (
-    <div className="p-8 max-w-6xl mx-auto h-full flex flex-col w-full overflow-y-auto scrollbar-hide">
+    <div className="p-8 max-w-6xl mx-auto h-full flex flex-col w-full overflow-y-auto scrollbar-hide relative">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
       <header className="mb-8 relative">
         <div className="absolute -left-4 top-1/2 -translate-y-1/2 w-1 h-12 bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]" />
         <h2 className="text-3xl font-bold tracking-tight text-emerald-50 flex items-center gap-3 drop-shadow-[0_0_10px_rgba(16,185,129,0.3)]">
@@ -143,7 +145,7 @@ export default function AutomationDashboard() {
         <p className="text-xs text-emerald-500/70 font-mono mt-2 uppercase tracking-widest">Automated Recon, Fingerprinting, and Fuzzing Workflow</p>
       </header>
 
-      <div className="bg-black/40 backdrop-blur-md border border-emerald-900/30 p-6 rounded-lg mb-8 shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative overflow-hidden">
+      <div className="cyber-card p-6 mb-8">
         <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
         <div className="flex gap-4 items-end relative z-10">
           <div className="flex-1">
@@ -153,13 +155,13 @@ export default function AutomationDashboard() {
               value={targetUrl}
               onChange={e => setTargetUrl(e.target.value)}
               placeholder="https://api.example.com"
-              className="w-full bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all placeholder:text-emerald-900/50"
+              className="cyber-input w-full"
             />
           </div>
           <button
             onClick={handleStart}
             disabled={loading || !targetUrl}
-            className="bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-8 py-2.5 text-xs font-mono uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.4)] transition-all disabled:opacity-50 disabled:hover:shadow-none rounded-md"
+            className="cyber-button px-8"
           >
             {loading ? <Clock className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />} 
             Start Hunt
@@ -174,8 +176,8 @@ export default function AutomationDashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
-        <div className="lg:col-span-1 bg-black/40 backdrop-blur-md border border-emerald-900/30 rounded-lg flex flex-col overflow-hidden shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
-          <div className="p-4 bg-emerald-950/20 border-b border-emerald-900/30 text-[10px] uppercase font-mono tracking-widest text-emerald-400/80 flex items-center gap-2">
+        <div className="lg:col-span-1 cyber-card flex flex-col">
+          <div className="p-4 bg-emerald-950/20 border-b border-emerald-900/30 text-[10px] uppercase font-mono tracking-widest text-emerald-400/80 flex items-center gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <Activity className="w-3 h-3" /> Job History
           </div>
           <div className="flex-1 overflow-y-auto scrollbar-hide p-2 space-y-2">
@@ -206,10 +208,10 @@ export default function AutomationDashboard() {
           </div>
         </div>
 
-        <div className="lg:col-span-2 bg-black/40 backdrop-blur-md border border-emerald-900/30 rounded-lg flex flex-col overflow-hidden shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative">
+        <div className="lg:col-span-2 cyber-card flex flex-col">
           <div className="absolute top-0 right-0 w-[300px] h-[300px] bg-emerald-500/5 blur-[100px] rounded-full pointer-events-none" />
           
-          <div className="p-4 bg-emerald-950/20 border-b border-emerald-900/30 flex justify-between items-center relative z-10">
+          <div className="p-4 bg-emerald-950/20 border-b border-emerald-900/30 flex justify-between items-center relative z-10 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <span className="text-[10px] uppercase font-mono tracking-widest text-emerald-400/80 flex items-center gap-2">
               <Terminal className="w-3 h-3" /> Job Details & Findings
             </span>
@@ -238,11 +240,13 @@ export default function AutomationDashboard() {
             ) : (
               <div className="space-y-6">
                 <div className="grid grid-cols-2 gap-4">
-                  <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner">
+                  <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-[1px] bg-emerald-500/30" />
                     <div className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest mb-1">Target</div>
                     <div className="text-sm font-mono text-emerald-100 truncate" title={selectedJob.target_url}>{selectedJob.target_url}</div>
                   </div>
-                  <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner">
+                  <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-[1px] bg-emerald-500/30" />
                     <div className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest mb-1">Status</div>
                     <div className={`text-sm font-mono uppercase tracking-wider font-bold ${selectedJob.status === 'running' ? 'text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.5)]' : selectedJob.status === 'completed' ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]' : 'text-red-400 drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]'}`}>
                       {selectedJob.status} {selectedJob.phase && `(${selectedJob.phase})`}
@@ -250,16 +254,90 @@ export default function AutomationDashboard() {
                   </div>
                 </div>
 
+                {/* Intelligence Status */}
+                {selectedJob.status === 'running' && logs.some(l => l.data?.active_intelligence) && (
+                  <div className="p-4 bg-emerald-900/10 border border-emerald-500/20 rounded-md flex gap-4 items-center">
+                    <Activity className="w-5 h-5 text-emerald-400 animate-pulse" />
+                    <div className="flex-1 grid grid-cols-3 gap-2">
+                      {(() => {
+                        const intelLog = [...logs].reverse().find(l => l.data?.active_intelligence);
+                        const intel = intelLog?.data?.active_intelligence;
+                        return (
+                          <>
+                            <div className="text-center">
+                              <div className="text-[8px] uppercase font-mono text-emerald-500/50">Prioritized Targets</div>
+                              <div className="text-xs font-mono text-emerald-300">{intel?.prioritized_targets || 0}</div>
+                            </div>
+                            <div className="text-center border-x border-emerald-500/10">
+                              <div className="text-[8px] uppercase font-mono text-emerald-500/50">Discovered Users</div>
+                              <div className="text-xs font-mono text-emerald-300">{intel?.users || 0}</div>
+                            </div>
+                            <div className="text-center">
+                              <div className="text-[8px] uppercase font-mono text-emerald-500/50">Active Identifiers</div>
+                              <div className="text-xs font-mono text-emerald-300">{intel?.identifiers || 0}</div>
+                            </div>
+                          </>
+                        );
+                      })()}
+                    </div>
+                    <div className="text-[8px] uppercase font-mono text-emerald-400 font-bold tracking-tighter">
+                      Autonomous Chain Active
+                    </div>
+                  </div>
+                )}
+
+                {/* Workflow Progress Bar */}
+                <div className="py-4 px-2">
+                  <div className="flex justify-between mb-2">
+                    {['Phase 1', 'Phase 2', 'Phase 3', 'Phase 3.5', 'Phase 4', 'Phase 5'].map((phase, idx) => {
+                      const isCompleted = selectedJob.status === 'completed' || (selectedJob.phase && parseInt(selectedJob.phase.match(/\d+/)?.[0] || '0') > (idx + 1));
+                      const isCurrent = selectedJob.phase?.includes(phase);
+                      return (
+                        <div key={phase} className="flex flex-col items-center gap-1 w-full relative">
+                          <div className={`w-3 h-3 rounded-full border-2 transition-all ${
+                            isCompleted ? 'bg-emerald-500 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,1)]' :
+                            isCurrent ? 'bg-amber-500 border-amber-400 animate-pulse' :
+                            'bg-black border-emerald-900/50'
+                          }`} />
+                          <span className={`text-[8px] font-mono uppercase tracking-tighter ${
+                            isCompleted || isCurrent ? 'text-emerald-400' : 'text-emerald-900/50'
+                          }`}>{phase.replace('Phase ', '')}</span>
+                          {idx < 5 && (
+                            <div className={`absolute left-[50%] top-1.5 w-full h-[1px] -z-10 ${
+                              isCompleted ? 'bg-emerald-500' : 'bg-emerald-900/30'
+                            }`} />
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+
                 {/* Live Logs */}
                 <div className="flex-1 flex flex-col min-h-[300px]">
-                  <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider mb-4 border-b border-emerald-900/30 pb-2 flex items-center gap-2">
-                    <Terminal className="w-3 h-3" /> Live Execution Logs
-                  </h3>
-                  <div className="flex-1 bg-black/80 border border-emerald-900/50 rounded-md p-4 font-mono text-[10px] overflow-y-auto space-y-1 scrollbar-hide">
+                  <div className="flex justify-between items-center mb-4 border-b border-emerald-900/30 pb-2">
+                    <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider flex items-center gap-2">
+                      <Terminal className="w-3 h-3" /> Live Execution Logs
+                    </h3>
+                    <div className="flex gap-2">
+                      {(['all', 'info', 'warn', 'vuln'] as const).map(f => (
+                        <button
+                          key={f}
+                          onClick={() => setLogFilter(f)}
+                          className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded border transition-all ${
+                            logFilter === f ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400' : 'bg-black/40 border-emerald-900/50 text-emerald-500/50 hover:text-emerald-400'
+                          }`}
+                        >
+                          {f}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex-1 bg-black/80 border border-emerald-900/50 rounded-md p-4 font-mono text-[10px] overflow-y-auto space-y-1 scrollbar-hide max-h-[400px]">
                     {logs.length === 0 ? (
                       <div className="text-emerald-900/50 italic italic">Waiting for logs...</div>
                     ) : (
-                      logs.map((log, i) => (
+                      logs.filter(log => logFilter === 'all' || log.level === logFilter).map((log, i) => (
                         <div key={i} className="flex gap-2">
                           <span className="text-emerald-900/50">[{new Date(log.created_at).toLocaleTimeString()}]</span>
                           <span className={`uppercase font-bold ${

@@ -63,7 +63,8 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
   };
 
   return (
-    <div className="p-8 max-w-6xl mx-auto w-full h-full overflow-y-auto scrollbar-hide">
+    <div className="p-8 max-w-6xl mx-auto w-full h-full overflow-y-auto scrollbar-hide relative">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
       <header className="mb-12 flex justify-between items-end relative">
         <div className="absolute -left-4 top-1/2 -translate-y-1/2 w-1 h-12 bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]" />
         <div>
@@ -75,7 +76,7 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
         </div>
         <button
           onClick={() => setShowImport(!showImport)}
-          className="bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-6 py-2.5 text-xs font-mono uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.4)] transition-all rounded-md"
+          className="cyber-button"
         >
           <Import className="w-4 h-4" />
           Import Data
@@ -83,7 +84,7 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
       </header>
 
       {showImport && (
-        <div className="bg-black/40 backdrop-blur-md border border-emerald-900/30 p-8 mb-8 rounded-lg animate-in fade-in slide-in-from-top-4 shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative overflow-hidden">
+        <div className="cyber-card p-8 mb-8 animate-in fade-in slide-in-from-top-4">
           <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
           <div className="flex justify-between items-center mb-4 relative z-10">
             <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider flex items-center gap-2">
@@ -98,7 +99,7 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
             value={importText}
             onChange={(e) => setImportText(e.target.value)}
             placeholder="https://api.example.com/v1/user GET katana"
-            className="w-full h-48 bg-black/50 border border-emerald-900/50 p-4 text-xs font-mono text-emerald-100 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all placeholder:text-emerald-900/50 relative z-10"
+            className="cyber-input w-full h-48 p-4 resize-none"
           />
           <div className="mt-4 flex justify-end gap-4 relative z-10">
             <button onClick={() => setShowImport(false)} className="text-xs font-mono uppercase tracking-widest text-emerald-500/50 hover:text-emerald-400 transition-colors">Cancel</button>
@@ -107,7 +108,7 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
         </div>
       )}
 
-      <div className="bg-black/40 backdrop-blur-md border border-emerald-900/30 rounded-lg shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative overflow-hidden">
+      <div className="cyber-card">
         <div className="absolute top-0 right-0 w-[300px] h-[300px] bg-emerald-500/5 blur-[100px] rounded-full pointer-events-none" />
         
         <div className="grid grid-cols-12 gap-4 p-4 border-b border-emerald-900/30 bg-emerald-950/20 rounded-t-lg text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 relative z-10">

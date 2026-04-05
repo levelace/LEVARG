@@ -43,7 +43,8 @@ export default function ScopeManager() {
   };
 
   return (
-    <div className="p-8 max-w-4xl mx-auto w-full h-full overflow-y-auto scrollbar-hide">
+    <div className="p-8 max-w-4xl mx-auto w-full h-full overflow-y-auto scrollbar-hide relative">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
       <header className="mb-12 relative">
         <div className="absolute -left-4 top-1/2 -translate-y-1/2 w-1 h-12 bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]" />
         <h2 className="text-3xl font-bold tracking-tight text-emerald-50 flex items-center gap-3 drop-shadow-[0_0_10px_rgba(16,185,129,0.3)]">
@@ -53,7 +54,7 @@ export default function ScopeManager() {
         <p className="text-xs text-emerald-500/70 font-mono mt-2 uppercase tracking-widest">Define and manage approved research boundaries</p>
       </header>
 
-      <div className="bg-black/40 backdrop-blur-md border border-emerald-900/30 p-8 mb-8 rounded-lg shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative overflow-hidden">
+      <div className="cyber-card p-8 mb-8">
         <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
         <form onSubmit={addScope} className="flex gap-4 relative z-10">
           <div className="flex-1 relative">
@@ -62,12 +63,12 @@ export default function ScopeManager() {
               value={newDomain}
               onChange={(e) => setNewDomain(e.target.value)}
               placeholder="e.g. example.com"
-              className="w-full bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-3 text-sm font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all placeholder:text-emerald-900/50"
+              className="cyber-input w-full"
             />
           </div>
           <button
             type="submit"
-            className="bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-6 py-3 text-xs font-mono uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.4)] transition-all rounded-md"
+            className="cyber-button"
           >
             <Plus className="w-4 h-4" />
             Add Domain
@@ -92,7 +93,7 @@ export default function ScopeManager() {
           </div>
         ) : (
           scopes.map((scope) => (
-            <div key={scope.id} className="bg-black/40 backdrop-blur-md border border-emerald-900/30 p-4 rounded-lg flex items-center justify-between group hover:border-emerald-500/50 hover:bg-emerald-950/20 transition-all duration-300 shadow-[0_4px_20px_rgba(0,0,0,0.2)] relative overflow-hidden">
+            <div key={scope.id} className="cyber-card p-4 flex items-center justify-between group hover:border-emerald-500/50 hover:bg-emerald-950/20 transition-all duration-300">
               <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.02)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_3s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />
               <div className="flex items-center gap-4 relative z-10">
                 <div className="w-10 h-10 bg-emerald-500/10 border border-emerald-500/30 rounded-md flex items-center justify-center group-hover:bg-emerald-500/20 group-hover:shadow-[0_0_10px_rgba(16,185,129,0.3)] transition-all">
