@@ -45,7 +45,8 @@ export default function Dashboard() {
   ];
 
   return (
-    <div className="p-8 max-w-6xl mx-auto w-full h-full overflow-y-auto scrollbar-hide">
+    <div className="p-8 max-w-6xl mx-auto w-full h-full overflow-y-auto scrollbar-hide relative">
+      <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
       <header className="mb-12 relative">
         <div className="absolute -left-4 top-1/2 -translate-y-1/2 w-1 h-12 bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]" />
         <h2 className="text-3xl font-bold tracking-tight text-emerald-50 flex items-center gap-3 drop-shadow-[0_0_10px_rgba(16,185,129,0.3)]">
@@ -57,7 +58,7 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12">
         {cards.map((card, i) => (
-          <div key={i} className={`bg-black/40 backdrop-blur-md border ${card.border} p-6 flex flex-col gap-4 rounded-lg group hover:bg-emerald-900/20 transition-all duration-300 relative overflow-hidden shadow-[0_4px_20px_rgba(0,0,0,0.3)]`}>
+          <div key={i} className={`cyber-card ${card.border} p-6 flex flex-col gap-4 group hover:bg-emerald-900/20 transition-all duration-300`}>
             <div className={`absolute -right-4 -top-4 w-24 h-24 ${card.bg} rounded-full blur-2xl opacity-50 group-hover:opacity-100 transition-opacity`} />
             <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(255,255,255,0.02)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_3s_infinite_linear] pointer-events-none" />
             <div className="flex justify-between items-start relative z-10">
@@ -75,7 +76,7 @@ export default function Dashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 bg-black/40 backdrop-blur-md border border-emerald-900/30 p-8 rounded-lg shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative overflow-hidden">
+        <div className="lg:col-span-2 cyber-card p-8">
           <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
           <h3 className="text-sm font-mono uppercase tracking-widest text-emerald-300 mb-6 flex items-center gap-3">
             <Activity className="w-4 h-4 text-emerald-400 animate-pulse" />
@@ -112,7 +113,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="bg-black/60 backdrop-blur-md border border-emerald-900/30 p-8 rounded-lg flex flex-col justify-between relative overflow-hidden shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
+        <div className="cyber-card p-8 flex flex-col justify-between">
           <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')] opacity-[0.03] mix-blend-overlay pointer-events-none" />
           <div className="absolute top-0 right-0 w-[150px] h-[150px] bg-emerald-500/10 blur-[50px] rounded-full pointer-events-none" />
           

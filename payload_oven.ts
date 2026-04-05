@@ -6,6 +6,32 @@ export interface PayloadTier {
   elite: string[];
 }
 
+export class MutationEngine {
+  static mutate(payload: string, type: 'url' | 'double-url' | 'html' | 'hex' | 'unicode'): string {
+    switch (type) {
+      case 'url': return encodeURIComponent(payload);
+      case 'double-url': return encodeURIComponent(encodeURIComponent(payload));
+      case 'html': return payload.split('').map(c => `&#${c.charCodeAt(0)};`).join('');
+      case 'hex': return payload.split('').map(c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`).join('');
+      case 'unicode': return payload.split('').map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('');
+      default: return payload;
+    }
+  }
+
+  static evasiveWrap(payload: string): string {
+    // Advanced evasion: wrap in junk data or common WAF bypass prefixes
+    const wrappers = [
+      (p: string) => `/*junk*/${p}/*junk*/`,
+      (p: string) => `%00${p}%00`,
+      (p: string) => `?id=${p}`,
+      (p: string) => `{"test":"${p.replace(/"/g, '\\"')}"}`,
+      (p: string) => `[${p}]`,
+    ];
+    const wrapper = wrappers[Math.floor(Math.random() * wrappers.length)];
+    return wrapper(payload);
+  }
+}
+
 export class PayloadOven {
   private static oven: Record<string, PayloadTier> = {
     'SQLi': {
@@ -176,16 +202,27 @@ export class PayloadOven {
     }
   };
 
-  static getPayloads(category?: string, layer: 1 | 2 | 3 = 1, count: number = 10): string[] {
+  static getPayloads(category?: string, layer: 1 | 2 | 3 = 1, count: number = 10, evasive: boolean = false): string[] {
     const layerKey = layer === 1 ? 'standard' : layer === 2 ? 'advanced' : 'elite';
     
+    let payloads: string[] = [];
     if (category && this.oven[category]) {
-      return this.shuffle(this.oven[category][layerKey]).slice(0, count);
+      payloads = this.shuffle(this.oven[category][layerKey]).slice(0, count);
+    } else {
+      const all = Object.values(this.oven).flatMap(tier => tier[layerKey]);
+      payloads = this.shuffle(all).slice(0, count);
     }
+
+    if (evasive) {
+      const types: ('url' | 'double-url' | 'html' | 'hex' | 'unicode')[] = ['url', 'double-url', 'html', 'hex', 'unicode'];
+      return payloads.map(p => {
+        const type = types[Math.floor(Math.random() * types.length)];
+        return MutationEngine.evasiveWrap(MutationEngine.mutate(p, type));
+      });
+    }
+    return payloads;
     
-    // If no category or category not found, return a mix from the specified layer
-    const all = Object.values(this.oven).flatMap(tier => tier[layerKey]);
-    return this.shuffle(all).slice(0, count);
+    return payloads;
   }
 
   static getAllCategories(): string[] {
@@ -195,19 +232,25 @@ export class PayloadOven {
   static async generateCustomPayload(ai: GoogleGenAI | null, category: string, context: string): Promise<string> {
     if (!ai) return this.getPayloads(category, 1, 1)[0];
 
-    const prompt = `As an elite security researcher (argila), generate a highly specialized, stealthy ${category} payload for the following context:
+    const prompt = `As an elite security researcher (argila) and red-team strategist, generate a highly specialized, stealthy ${category} payload for the following context:
     Context: ${context}
     
     The payload should be designed to bypass modern WAFs and find the exact security gap.
+    If context contains "Discovered Intel", use those usernames or IDs to create targeted, chained exploit attempts.
+
     Return ONLY the raw payload string, no explanation.`;
 
     try {
       const res = await ai.models.generateContent({
-        // FIX: was 'gemini-3.1-pro-preview' which is an invalid model string
         model: 'gemini-1.5-pro',
-        contents: [{ role: 'user', parts: [{ text: prompt }] }]
+        contents: prompt
       });
-      return res.response.text()?.trim() || this.getPayloads(category, 1, 1)[0];
+      const rawPayload = res.text?.trim() || this.getPayloads(category, 1, 1)[0];
+
+      // Randomly apply an extra layer of mutation to AI generated payloads for maximum evasion
+      const mutationTypes: ('url' | 'double-url' | 'html' | 'hex' | 'unicode')[] = ['url', 'double-url', 'html', 'hex', 'unicode'];
+      const type = mutationTypes[Math.floor(Math.random() * mutationTypes.length)];
+      return Math.random() > 0.5 ? MutationEngine.mutate(rawPayload, type) : rawPayload;
     } catch (e) {
       return this.getPayloads(category, 1, 1)[0];
     }

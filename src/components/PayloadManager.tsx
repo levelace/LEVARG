@@ -82,13 +82,15 @@ export default function PayloadManager() {
       The payload type is: ${newPayload.type}.
       Return ONLY the payloads, one per line. Do not include markdown formatting, numbers, or explanations.`;
       
-      const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: prompt,
+      const result = await ai.models.generateContent({
+        model: 'gemini-1.5-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
       });
       
-      if (response.text) {
-        setNewPayload({ ...newPayload, content: response.text.trim() });
+      // Use the proper property access for the SDK
+      const responseText = (result as any).response.text();
+      if (responseText) {
+        setNewPayload({ ...newPayload, content: responseText.trim() });
       }
     } catch (err: any) {
       console.error('AI Generation failed:', err);
