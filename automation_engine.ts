@@ -24,6 +24,8 @@ export class AutomationEngine {
 
   private static wildcardTitles: Map<string, string> = new Map();
 
+  private static activeJobs = 0;
+
   private static async checkWildcard200(asset: string) {
     try {
       const randomPath = `${asset.endsWith('/') ? asset : asset + '/'}.well-known/random-path-${uuidv4().substring(0, 8)}`;
@@ -119,15 +121,16 @@ export class AutomationEngine {
           const testUrl = `${callbackUrl}?code=test_code&${stateParam}=attack_state`;
           const csrfRes = await axios.get(testUrl, { validateStatus: () => true });
           
-          const analysisPrompt = `As an autonomous security agent (argila), analyze this Authentication Flow interaction.
+          const analysisPrompt = `As an autonomous security agent (argila), analyze this Authentication Flow interaction for ${hostname}.
           Target URL: ${testUrl}
           Original Redirect URL: ${currentUrl}
           Response Status: ${csrfRes.status}
           Response Body (truncated): ${typeof csrfRes.data === 'string' ? csrfRes.data.substring(0, 1000) : JSON.stringify(csrfRes.data).substring(0, 1000)}
           
+          [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+          [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+
           Memory of Target Behavior:
-          - Tech Stack: ${memory.tech.join(', ')}
-          - Identifiers: ${JSON.stringify(memory.identifiers)}
           - Previous Findings: ${JSON.stringify(memory.findings)}
           
           Determine if the application is vulnerable to OAuth/SSO State CSRF (Pre-Auth Account Takeover).
@@ -136,12 +139,13 @@ export class AutomationEngine {
 
           const analysisRes = await ai.models.generateContent({
             model: 'gemini-1.5-pro',
-            contents: analysisPrompt,
-            config: { responseMimeType: 'application/json' }
+            contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+            generationConfig: { responseMimeType: 'application/json' }
           });
 
-          if (analysisRes.text) {
-            const analysis = JSON.parse(analysisRes.text);
+          const responseText = analysisRes.response.text();
+          if (responseText) {
+            const analysis = JSON.parse(responseText);
             this.log(jobId, 'info', `Auth Flow Analysis for ${asset}: ${analysis.isVulnerable ? 'VULNERABLE' : 'NOT VULNERABLE'} (${analysis.confidence})`, { explanation: analysis.explanation });
             if (analysis.isVulnerable && analysis.confidence > 0.8) {
               this.log(jobId, 'vuln', `CONFIRMED AUTH CSRF: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
@@ -203,12 +207,13 @@ export class AutomationEngine {
 
             const analysisRes = await ai.models.generateContent({
               model: 'gemini-1.5-pro',
-              contents: analysisPrompt,
-              config: { responseMimeType: 'application/json' }
+              contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+              generationConfig: { responseMimeType: 'application/json' }
             });
 
-            if (analysisRes.text) {
-              const analysis = JSON.parse(analysisRes.text);
+            const responseText = analysisRes.response.text();
+            if (responseText) {
+              const analysis = JSON.parse(responseText);
               if (analysis.isVulnerable && analysis.confidence > 0.8) {
                 this.log(jobId, 'vuln', `CONFIRMED USER ENUMERATION: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                 MemoryManager.addFinding(jobId, hostname, { type: 'User Enumeration', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
@@ -241,14 +246,15 @@ export class AutomationEngine {
           const hasProductMarkers = bodyStr.includes('price') || bodyStr.includes('variant') || bodyStr.includes('sku');
 
           if (isJson && hasProductMarkers && ai) {
-            const analysisPrompt = `Analyze this e-commerce product data for Business Logic flaws.
+            const analysisPrompt = `Analyze this e-commerce product data for Business Logic flaws on ${hostname}.
             Endpoint: ${ep}
             Response Body (truncated): ${typeof res.data === 'string' ? res.data.substring(0, 2000) : JSON.stringify(res.data).substring(0, 2000)}
             
+            [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+            [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+
             Memory of Target Behavior:
-            - Tech Stack: ${memory.tech.join(', ')}
             - Previous Findings: ${JSON.stringify(memory.findings)}
-            - Identifiers: ${JSON.stringify(memory.identifiers)}
             
             Look for price manipulation, hidden discount codes, or logic bypasses.
             Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
@@ -256,12 +262,13 @@ export class AutomationEngine {
 
             const analysisRes = await ai.models.generateContent({
               model: 'gemini-1.5-pro',
-              contents: analysisPrompt,
-              config: { responseMimeType: 'application/json' }
+              contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+              generationConfig: { responseMimeType: 'application/json' }
             });
 
-            if (analysisRes.text) {
-              const analysis = JSON.parse(analysisRes.text);
+            const responseText = analysisRes.response.text();
+            if (responseText) {
+              const analysis = JSON.parse(responseText);
               if (analysis.isVulnerable && analysis.confidence > 0.8) {
                 this.log(jobId, 'vuln', `CONFIRMED BUSINESS LOGIC FLAW: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                 MemoryManager.addFinding(jobId, hostname, { type: 'Business Logic Flaw', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
@@ -274,13 +281,24 @@ export class AutomationEngine {
   }
 
   static async startJob(targetUrl: string) {
+    if (this.activeJobs >= 2) {
+      throw new Error('Maximum concurrent jobs (2) reached. Please wait for a job to complete.');
+    }
+    this.activeJobs++;
     const jobId = uuidv4();
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
     const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
     
     // Check Scope
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
-    const isAllowed = scopes.some(s => targetUrl.includes(s.domain));
+    const isAllowed = scopes.some(s => {
+      try {
+        const targetHost = new URL(targetUrl).hostname;
+        return targetHost === s.domain || targetHost.endsWith(`.${s.domain}`);
+      } catch (e) {
+        return false;
+      }
+    });
     if (scopes.length > 0 && !isAllowed) {
       throw new Error('Target domain not in scope');
     }
@@ -308,7 +326,7 @@ export class AutomationEngine {
         // Strategy 1: Passive Discovery & Common Subdomain Brute-forcing
         this.log(jobId, 'info', 'Strategy 1: Passive Subdomain Discovery & Common Subdomain Brute-forcing');
         try {
-          const subResult = await ToolManager.execute('subfinder', `-d ${hostname} -silent`, jobId, 
+          const subResult = await ToolManager.execute('subfinder', ['-d', hostname, '-silent'], jobId,
             () => ToolManager.polyfillSubdomainDiscovery(hostname));
           if (subResult?.stdout) {
             const subs = subResult.stdout.trim().split('\n').filter((s: string) => s.length > 0).map((s: string) => `https://${s}`);
@@ -334,7 +352,7 @@ export class AutomationEngine {
         // Strategy 2: Active Port Scanning
         this.log(jobId, 'info', 'Strategy 2: Active Port Scanning');
         try {
-          const nmapResult = await ToolManager.execute('nmap', `-F ${hostname}`, jobId,
+          const nmapResult = await ToolManager.execute('nmap', ['-F', hostname], jobId,
             () => ToolManager.polyfillPortScan(hostname, [80, 443, 8080, 8443, 3000, 22, 3306, 5432, 6379]));
           if (nmapResult?.stdout) {
             openPorts.push({ host: hostname, results: nmapResult.stdout });
@@ -355,7 +373,7 @@ export class AutomationEngine {
 
         for (const asset of discoveredAssets.slice(0, 5)) {
           try {
-            const httpxResult = await ToolManager.execute('httpx', asset, jobId,
+            const httpxResult = await ToolManager.execute('httpx', [asset], jobId,
               () => ToolManager.polyfillHttpx(asset));
             if (httpxResult?.stdout) {
               const data = JSON.parse(httpxResult.stdout);
@@ -438,12 +456,13 @@ export class AutomationEngine {
                       
                       const secretRes = await ai.models.generateContent({
                         model: 'gemini-1.5-pro',
-                        contents: secretPrompt,
-                        config: { responseMimeType: 'application/json' }
+                        contents: [{ role: 'user', parts: [{ text: secretPrompt }] }],
+                        generationConfig: { responseMimeType: 'application/json' }
                       });
                       
-                      if (secretRes.text) {
-                        const analysis = JSON.parse(secretRes.text);
+                      const responseText = secretRes.response.text();
+                      if (responseText) {
+                        const analysis = JSON.parse(responseText);
                         if (analysis.found) {
                           this.log(jobId, 'vuln', `SECRET DISCOVERED IN JS: ${scriptUrl}`, { secrets: analysis.secrets, explanation: analysis.explanation });
                           MemoryManager.addFinding(jobId, hostname, { type: 'Hardcoded Secret', asset: scriptUrl, gap: 'Sensitive data in client-side JS', details: analysis.explanation });
@@ -537,6 +556,31 @@ export class AutomationEngine {
         endpoints = Array.from(new Set(endpoints.map(e => JSON.stringify(e)))).map(s => JSON.parse(s));
         allFindings.push({ phase: 'Phase 3', type: 'Endpoints Discovered', count: endpoints.length });
 
+        // AI-Driven Security Interest Ranking
+        if (ai && endpoints.length > 0) {
+          this.log(jobId, 'info', 'Phase 3.5: AI-Driven Security Interest Ranking');
+          const rankingPrompt = `Rank the following endpoints by security interest (likelihood of vulnerability).
+          Endpoints: ${JSON.stringify(endpoints.slice(0, 100))}
+          Tech Stack: ${MemoryManager.getMemory(jobId, hostname).tech.join(', ')}
+
+          Return JSON: { "ranked_endpoints": [ { "url": string, "method": string, "reason": string, "priority": number } ] }`;
+
+          try {
+            const rankingRes = await ai.models.generateContent({
+              model: 'gemini-1.5-pro',
+              contents: [{ role: 'user', parts: [{ text: rankingPrompt }] }],
+              generationConfig: { responseMimeType: 'application/json' }
+            });
+            const responseText = rankingRes.response.text();
+            if (responseText) {
+              const ranked = JSON.parse(responseText).ranked_endpoints;
+              this.log(jobId, 'info', `AI ranked ${ranked.length} endpoints for prioritized testing.`);
+              // We could use this to reorder testing, but for now we just log it as a finding
+              allFindings.push({ phase: 'Phase 3.5', type: 'AI Prioritization', data: ranked });
+            }
+          } catch (e) {}
+        }
+
         // --- PHASE 4: EXPLOITATION & PoC (VULNERABILITY VERIFICATION) ---
         this.updateJob(jobId, 'running', 'Phase 4: Exploitation');
         this.log(jobId, 'info', 'Starting Phase 4: Autonomous AI-Driven Vulnerability Verification');
@@ -581,12 +625,13 @@ export class AutomationEngine {
 
               const analysisRes = await ai.models.generateContent({
                 model: 'gemini-1.5-pro',
-                contents: analysisPrompt,
-                config: { responseMimeType: 'application/json' }
+                contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+                generationConfig: { responseMimeType: 'application/json' }
               });
 
-              if (analysisRes.text) {
-                const analysis = JSON.parse(analysisRes.text);
+              const responseText = analysisRes.response.text();
+              if (responseText) {
+                const analysis = JSON.parse(responseText);
                 if (analysis.isVulnerable && analysis.confidence > 0.8) {
                   this.log(jobId, 'vuln', `CONFIRMED Sensitive File Disclosure: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                   MemoryManager.addFinding(jobId, hostname, { type: 'Sensitive File Disclosure', endpoint: sf.url, gap: analysis.gap_identified, chain_potential: analysis.chain_potential });
@@ -663,12 +708,13 @@ export class AutomationEngine {
 
                     const analysisRes = await ai.models.generateContent({
                       model: 'gemini-1.5-pro',
-                      contents: analysisPrompt,
-                      config: { responseMimeType: 'application/json' }
+                      contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+                      generationConfig: { responseMimeType: 'application/json' }
                     });
 
-                    if (analysisRes.text) {
-                      const analysis = JSON.parse(analysisRes.text);
+                    const responseText = analysisRes.response.text();
+                    if (responseText) {
+                      const analysis = JSON.parse(responseText);
                       if (analysis.isVulnerable && analysis.confidence > 0.8) {
                         this.log(jobId, 'vuln', `CONFIRMED IDOR: ${analysis.gap_identified}`, { explanation: analysis.explanation });
                         vulnerabilities.push({ endpoint: ep.url, type: 'IDOR', gap: analysis.gap_identified, evidence: analysis.explanation });
@@ -710,7 +756,7 @@ export class AutomationEngine {
 
               // Agentic AI Verification (Only if there's a trigger)
               if (ai && (isStatusDiff || isLatencySpike || hasErrorMarkers)) {
-                const analysisPrompt = `As an autonomous security agent (argila), analyze this HTTP interaction to find the exact security gap.
+                const analysisPrompt = `As an autonomous security agent (argila), analyze this HTTP interaction on ${hostname} to find the exact security gap.
                 Target URL: ${testUrl}
                 Payload: ${customPayload}
                 Vulnerability Type: ${type}
@@ -718,9 +764,10 @@ export class AutomationEngine {
                 Response Latency: ${latency}ms
                 Response Body (truncated): ${typeof res.data === 'string' ? res.data.substring(0, 2000) : JSON.stringify(res.data).substring(0, 2000)}
                 
+                [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+                [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+
                 Memory of Target Behavior:
-                - Tech Stack: ${memory.tech.join(', ')}
-                - Identifiers: ${JSON.stringify(memory.identifiers)}
                 - Discovered Users: ${memory.discoveredUsers.join(', ')}
                 - Previous Findings: ${JSON.stringify(memory.findings)}
                 
@@ -731,12 +778,13 @@ export class AutomationEngine {
 
                 const analysisRes = await ai.models.generateContent({
                   model: 'gemini-1.5-pro',
-                  contents: analysisPrompt,
-                  config: { responseMimeType: 'application/json' }
+                  contents: [{ role: 'user', parts: [{ text: analysisPrompt }] }],
+                  generationConfig: { responseMimeType: 'application/json' }
                 });
                 
-                if (analysisRes.text) {
-                  const analysis = JSON.parse(analysisRes.text);
+                const responseText = analysisRes.response.text();
+                if (responseText) {
+                  const analysis = JSON.parse(responseText);
                   if (analysis.isVulnerable && analysis.confidence > 0.8) {
                     this.log(jobId, 'vuln', `CONFIRMED ${type}: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                     const finding = { 
@@ -765,11 +813,12 @@ export class AutomationEngine {
           try {
             const pocRes = await ai.models.generateContent({
               model: 'gemini-1.5-pro',
-              contents: pocPrompt,
-              config: { responseMimeType: 'application/json' }
+              contents: [{ role: 'user', parts: [{ text: pocPrompt }] }],
+              generationConfig: { responseMimeType: 'application/json' }
             });
-            if (pocRes.text) {
-              const pocData = JSON.parse(pocRes.text);
+            const responseText = pocRes.response.text();
+            if (responseText) {
+              const pocData = JSON.parse(responseText);
               allFindings.push({ phase: 'Phase 4', type: 'AI PoC Reports', data: pocData.pocs });
             }
           } catch (e) {}
@@ -796,6 +845,8 @@ export class AutomationEngine {
       } catch (err: any) {
         this.log(jobId, 'error', `Hunt failed at ${err.message}`);
         this.updateJob(jobId, 'failed');
+      } finally {
+        this.activeJobs--;
       }
     }, 0);
 

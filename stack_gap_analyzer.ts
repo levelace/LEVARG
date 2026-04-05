@@ -149,7 +149,14 @@ export class StackGapAnalyzer {
   static async analyze(url: string, method: string = 'GET', headers: any = {}) {
     // Scope Check
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
-    const isAllowed = scopes.some(s => url.includes(s.domain));
+    const isAllowed = scopes.some(s => {
+      try {
+        const targetHost = new URL(url).hostname;
+        return targetHost === s.domain || targetHost.endsWith(`.${s.domain}`);
+      } catch (e) {
+        return false;
+      }
+    });
     if (scopes.length > 0 && !isAllowed) {
       throw new Error('Target domain not in scope');
     }
