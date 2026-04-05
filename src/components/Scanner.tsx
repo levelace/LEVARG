@@ -72,10 +72,12 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
         })
       });
       const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start scan');
       setSelectedScan(data.id);
       fetchData();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      alert(`Scan Error: ${err.message}`);
     } finally {
       setLoading(false);
     }
@@ -101,7 +103,7 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
             <select
               value={method}
               onChange={e => setMethod(e.target.value)}
-              className="w-full bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all relative z-10"
+              className="cyber-input w-full relative z-10"
             >
               <option className="bg-emerald-950 text-emerald-100">GET</option>
               <option className="bg-emerald-950 text-emerald-100">POST</option>
@@ -127,7 +129,7 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
                 type="text"
                 value={targetUrl}
                 onChange={e => setTargetUrl(e.target.value)}
-                className="w-full bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all relative z-10"
+                className="cyber-input w-full relative z-10"
               />
               
               {showDiscoveries && (
@@ -167,7 +169,7 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
             <select
               value={payloadSetId}
               onChange={e => setPayloadSetId(e.target.value)}
-              className="w-full bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-2.5 text-xs font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all relative z-10"
+              className="cyber-input w-full relative z-10"
             >
               {payloads.map(p => <option key={p.id} value={p.id} className="bg-emerald-950 text-emerald-100">{p.name}</option>)}
             </select>
@@ -176,7 +178,7 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
             <button
               onClick={startScan}
               disabled={loading || !payloadSetId}
-              className="w-full bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-4 py-2.5 text-xs font-mono uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all disabled:opacity-50 rounded-md relative overflow-hidden group"
+              className="cyber-button w-full"
             >
               <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.1)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />
               <Play className="w-4 h-4 relative z-10" /> <span className="relative z-10">Start Scan</span>

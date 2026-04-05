@@ -1,10 +1,38 @@
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import portscanner from 'portscanner';
 import axios from 'axios';
 import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 
 const execAsync = promisify(exec);
+
+const spawnAsync = (command: string, args: string[]): Promise<{ stdout: string; stderr: string }> => {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args);
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('close', (code) => {
+      if (code === 0 || code === null) {
+        resolve({ stdout, stderr });
+      } else {
+        reject(new Error(`Command failed with exit code ${code}: ${stderr}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      reject(err);
+    });
+  });
+};
 
 export type ToolCategory = 'Recon' | 'Fingerprinting' | 'Discovery' | 'Vulnerability' | 'Exploitation';
 export type ExecutionMethod = 'BINARY' | 'NPX' | 'POLYFILL' | 'UNAVAILABLE';
@@ -69,18 +97,18 @@ export class ToolManager {
   /**
    * Orchestrates tool execution based on availability
    */
-  static async execute(toolName: string, args: string, jobId: string, polyfillFn?: () => Promise<any>): Promise<any> {
+  static async execute(toolName: string, args: string[], jobId: string, polyfillFn?: () => Promise<any>): Promise<any> {
     const status = await this.getToolStatus(toolName);
     const def = TOOL_DEFINITIONS.find(t => t.name === toolName)!;
 
     if (status.method === 'BINARY') {
       console.log(`[Job ${jobId}] Executing ${toolName} via BINARY`);
-      return await execAsync(`${def.binaryName} ${args}`);
+      return await spawnAsync(def.binaryName, args);
     } 
 
     if (status.method === 'NPX' && def.npxPackage) {
       console.log(`[Job ${jobId}] Executing ${toolName} via NPX`);
-      return await execAsync(`npx -y ${def.npxPackage} ${args}`);
+      return await spawnAsync('npx', ['-y', def.npxPackage, ...args]);
     }
 
     if (status.method === 'POLYFILL' && polyfillFn) {

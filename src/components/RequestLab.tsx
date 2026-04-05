@@ -15,6 +15,8 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [history, setHistory] = useState<any[]>([]);
+  const [historySearch, setHistorySearch] = useState('');
+  const [viewMode, setViewMode] = useState<'pretty' | 'raw' | 'split'>('pretty');
 
   useEffect(() => {
     if (initialRequest) {
@@ -149,7 +151,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
             <button
               onClick={analyzeResponse}
               disabled={analyzing}
-              className="px-6 py-2 text-xs font-mono uppercase tracking-widest flex items-center gap-2 border border-emerald-900/50 text-emerald-100 hover:bg-emerald-950/50 hover:text-emerald-400 hover:border-emerald-500/50 transition-all disabled:opacity-50 rounded-md relative overflow-hidden group"
+              className="cyber-button"
             >
               {!analyzing && <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.05)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />}
               {analyzing ? <Clock className="w-4 h-4 animate-spin text-emerald-400 relative z-10" /> : <Sparkles className="w-4 h-4 text-emerald-400 relative z-10" />}
@@ -159,7 +161,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
           <button
             onClick={sendRequest}
             disabled={loading}
-            className="bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-6 py-2 text-xs font-mono uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.4)] transition-all disabled:opacity-50 disabled:hover:shadow-none rounded-md shadow-[0_0_15px_rgba(16,185,129,0.1)] relative overflow-hidden group"
+            className="cyber-button"
           >
             {!loading && <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.1)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />}
             {loading ? <Clock className="w-4 h-4 animate-spin relative z-10" /> : <Play className="w-4 h-4 relative z-10" />}
@@ -174,8 +176,17 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
           <div className="p-3 bg-black/50 border-b border-emerald-900/30 text-[10px] font-mono text-emerald-500/70 uppercase tracking-wider flex items-center gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <History className="w-3 h-3" /> History
           </div>
+          <div className="p-2 border-b border-emerald-900/30">
+            <input
+              type="text"
+              placeholder="Search history..."
+              value={historySearch}
+              onChange={(e) => setHistorySearch(e.target.value)}
+              className="w-full bg-black/50 border border-emerald-900/50 text-[10px] font-mono px-2 py-1 rounded focus:outline-none focus:border-emerald-500/50"
+            />
+          </div>
           <div className="flex-1 overflow-y-auto scrollbar-hide">
-            {history.map((item) => (
+            {history.filter(item => item.url.toLowerCase().includes(historySearch.toLowerCase()) || item.method.toLowerCase().includes(historySearch.toLowerCase())).map((item) => (
               <div 
                 key={item.id} 
                 onClick={() => loadHistoryItem(item)}
@@ -220,7 +231,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
               type="text"
               value={url}
               onChange={(e) => setUrl(e.target.value)}
-              className="flex-1 bg-black/50 border border-emerald-900/50 text-emerald-100 px-3 py-1.5 text-xs font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all placeholder:text-emerald-900/50"
+              className="cyber-input flex-1"
             />
           </div>
 
@@ -296,9 +307,27 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
                   ))}
                 </div>
 
-                <div className="p-2 bg-black/30 text-[10px] font-mono text-emerald-500/70 uppercase tracking-wider border-b border-emerald-900/30">Response Body</div>
+              <div className="p-2 bg-black/30 text-[10px] font-mono text-emerald-500/70 uppercase tracking-wider border-b border-emerald-900/30 flex justify-between items-center">
+                <span>Response Body</span>
+                <div className="flex gap-2">
+                  {(['pretty', 'raw'] as const).map(mode => (
+                    <button
+                      key={mode}
+                      onClick={() => setViewMode(mode)}
+                      className={cn(
+                        "text-[9px] uppercase px-1.5 py-0.5 rounded border transition-all",
+                        viewMode === mode ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-400" : "bg-black/40 border-emerald-900/50 text-emerald-500/50 hover:text-emerald-400"
+                      )}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
+              </div>
                 <pre className="flex-1 p-4 text-xs font-mono overflow-auto bg-black/40 text-emerald-100/90 scrollbar-hide">
-                  {typeof response.body === 'object' 
+                {viewMode === 'pretty' && typeof response.body === 'string' && response.body.startsWith('{')
+                  ? JSON.stringify(JSON.parse(response.body), null, 2)
+                  : typeof response.body === 'object'
                     ? JSON.stringify(response.body, null, 2) 
                     : response.body}
                 </pre>

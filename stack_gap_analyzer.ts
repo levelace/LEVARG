@@ -149,7 +149,14 @@ export class StackGapAnalyzer {
   static async analyze(url: string, method: string = 'GET', headers: any = {}) {
     // Scope Check
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
-    const isAllowed = scopes.some(s => url.includes(s.domain));
+    const isAllowed = scopes.some(s => {
+      try {
+        const targetHost = new URL(url).hostname;
+        return targetHost === s.domain || targetHost.endsWith(`.${s.domain}`);
+      } catch (e) {
+        return false;
+      }
+    });
     if (scopes.length > 0 && !isAllowed) {
       throw new Error('Target domain not in scope');
     }
@@ -200,10 +207,24 @@ export class StackGapAnalyzer {
       { type: 'H2C Smuggling: Upgrade', headers: { ...headers, 'Connection': 'Upgrade', 'Upgrade': 'h2c' }, url },
       { type: 'H2C Smuggling: HTTP2-Settings', headers: { ...headers, 'Connection': 'Upgrade', 'Upgrade': 'h2c', 'HTTP2-Settings': 'AAMAAABkAAQAAP__', 'Host': 'localhost' }, url },
 
-      // Chunked Encoding / Transfer-Encoding Mutations
+      // Chunked Encoding / Transfer-Encoding Mutations (Smuggling Basics)
       { type: 'Transfer-Encoding: chunked', headers: { ...headers, 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '0\r\n\r\n' },
       { type: 'Transfer-Encoding: xchunked', headers: { ...headers, 'Transfer-Encoding': 'xchunked' }, url, method: 'POST', data: '0\r\n\r\n' },
       { type: 'Transfer-Encoding: chunked, identity', headers: { ...headers, 'Transfer-Encoding': 'chunked, identity' }, url, method: 'POST', data: '0\r\n\r\n' },
+
+      // CL.TE / TE.CL Desync / Smuggling (Probes)
+      { type: 'Smuggling: CL.TE Probe', headers: { ...headers, 'Content-Length': '4', 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '1\r\nZ\r\nQ' },
+      { type: 'Smuggling: TE.CL Probe', headers: { ...headers, 'Content-Length': '6', 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '0\r\n\r\nX' },
+      { type: 'Smuggling: Double Content-Length', headers: { ...headers, 'Content-Length': '0', 'Content-Length ': '0' }, url, method: 'POST' },
+      { type: 'Smuggling: Tab-Space-TE', headers: { ...headers, 'Transfer-Encoding\t': 'chunked' }, url, method: 'POST', data: '0\r\n\r\n' },
+
+      // Normalization Bypasses (Modern Path Traversal/Auth Bypass Probes)
+      { type: 'Normalization: /.;/', headers, url: url.replace(/(\/[^\/]+)$/, '/.;/admin') },
+      { type: 'Normalization: /..;/', headers, url: url.replace(/(\/[^\/]+)$/, '/..;/admin') },
+      { type: 'Normalization: /..%2f', headers, url: url.replace(/(\/[^\/]+)$/, '/..%2fadmin') },
+      { type: 'Normalization: /%2e%2e%2f', headers, url: url.replace(/(\/[^\/]+)$/, '/%2e%2e%2fadmin') },
+      { type: 'Normalization: /%ef%bc%8f', headers, url: url.replace(/(\/[^\/]+)$/, '/%ef%bc%8fadmin') },
+      { type: 'Normalization: Null Byte', headers, url: url + '%00' },
     ];
 
     for (const mutation of mutations) {

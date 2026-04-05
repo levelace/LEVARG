@@ -24,6 +24,8 @@ export class AutomationEngine {
 
   private static wildcardTitles: Map<string, string> = new Map();
 
+  private static activeJobs = 0;
+
   private static async checkWildcard200(asset: string) {
     try {
       const randomPath = `${asset.endsWith('/') ? asset : asset + '/'}.well-known/random-path-${uuidv4().substring(0, 8)}`;
@@ -119,15 +121,16 @@ export class AutomationEngine {
           const testUrl = `${callbackUrl}?code=test_code&${stateParam}=attack_state`;
           const csrfRes = await axios.get(testUrl, { validateStatus: () => true });
           
-          const analysisPrompt = `As an autonomous security agent (argila), analyze this Authentication Flow interaction.
+          const analysisPrompt = `As an autonomous security agent (argila), analyze this Authentication Flow interaction for ${hostname}.
           Target URL: ${testUrl}
           Original Redirect URL: ${currentUrl}
           Response Status: ${csrfRes.status}
           Response Body (truncated): ${typeof csrfRes.data === 'string' ? csrfRes.data.substring(0, 1000) : JSON.stringify(csrfRes.data).substring(0, 1000)}
           
+          [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+          [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+
           Memory of Target Behavior:
-          - Tech Stack: ${memory.tech.join(', ')}
-          - Identifiers: ${JSON.stringify(memory.identifiers)}
           - Previous Findings: ${JSON.stringify(memory.findings)}
           
           Determine if the application is vulnerable to OAuth/SSO State CSRF (Pre-Auth Account Takeover).
@@ -137,7 +140,7 @@ export class AutomationEngine {
           const analysisRes = await ai.models.generateContent({
             model: 'gemini-1.5-pro',
             contents: analysisPrompt,
-            config: { responseMimeType: 'application/json' }
+            config: { responseMimeType: 'application/json' } as any
           });
 
           if (analysisRes.text) {
@@ -204,7 +207,7 @@ export class AutomationEngine {
             const analysisRes = await ai.models.generateContent({
               model: 'gemini-1.5-pro',
               contents: analysisPrompt,
-              config: { responseMimeType: 'application/json' }
+              config: { responseMimeType: 'application/json' } as any
             });
 
             if (analysisRes.text) {
@@ -241,14 +244,15 @@ export class AutomationEngine {
           const hasProductMarkers = bodyStr.includes('price') || bodyStr.includes('variant') || bodyStr.includes('sku');
 
           if (isJson && hasProductMarkers && ai) {
-            const analysisPrompt = `Analyze this e-commerce product data for Business Logic flaws.
+            const analysisPrompt = `Analyze this e-commerce product data for Business Logic flaws on ${hostname}.
             Endpoint: ${ep}
             Response Body (truncated): ${typeof res.data === 'string' ? res.data.substring(0, 2000) : JSON.stringify(res.data).substring(0, 2000)}
             
+            [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+            [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+
             Memory of Target Behavior:
-            - Tech Stack: ${memory.tech.join(', ')}
             - Previous Findings: ${JSON.stringify(memory.findings)}
-            - Identifiers: ${JSON.stringify(memory.identifiers)}
             
             Look for price manipulation, hidden discount codes, or logic bypasses.
             Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
@@ -257,7 +261,7 @@ export class AutomationEngine {
             const analysisRes = await ai.models.generateContent({
               model: 'gemini-1.5-pro',
               contents: analysisPrompt,
-              config: { responseMimeType: 'application/json' }
+              config: { responseMimeType: 'application/json' } as any
             });
 
             if (analysisRes.text) {
@@ -274,13 +278,24 @@ export class AutomationEngine {
   }
 
   static async startJob(targetUrl: string) {
+    if (this.activeJobs >= 2) {
+      throw new Error('Maximum concurrent jobs (2) reached. Please wait for a job to complete.');
+    }
+    this.activeJobs++;
     const jobId = uuidv4();
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
     const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
     
     // Check Scope
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
-    const isAllowed = scopes.some(s => targetUrl.includes(s.domain));
+    const isAllowed = scopes.some(s => {
+      try {
+        const targetHost = new URL(targetUrl).hostname;
+        return targetHost === s.domain || targetHost.endsWith(`.${s.domain}`);
+      } catch (e) {
+        return false;
+      }
+    });
     if (scopes.length > 0 && !isAllowed) {
       throw new Error('Target domain not in scope');
     }
@@ -308,7 +323,7 @@ export class AutomationEngine {
         // Strategy 1: Passive Discovery & Common Subdomain Brute-forcing
         this.log(jobId, 'info', 'Strategy 1: Passive Subdomain Discovery & Common Subdomain Brute-forcing');
         try {
-          const subResult = await ToolManager.execute('subfinder', `-d ${hostname} -silent`, jobId, 
+          const subResult = await ToolManager.execute('subfinder', ['-d', hostname, '-silent'], jobId,
             () => ToolManager.polyfillSubdomainDiscovery(hostname));
           if (subResult?.stdout) {
             const subs = subResult.stdout.trim().split('\n').filter((s: string) => s.length > 0).map((s: string) => `https://${s}`);
@@ -334,7 +349,7 @@ export class AutomationEngine {
         // Strategy 2: Active Port Scanning
         this.log(jobId, 'info', 'Strategy 2: Active Port Scanning');
         try {
-          const nmapResult = await ToolManager.execute('nmap', `-F ${hostname}`, jobId,
+          const nmapResult = await ToolManager.execute('nmap', ['-F', hostname], jobId,
             () => ToolManager.polyfillPortScan(hostname, [80, 443, 8080, 8443, 3000, 22, 3306, 5432, 6379]));
           if (nmapResult?.stdout) {
             openPorts.push({ host: hostname, results: nmapResult.stdout });
@@ -355,7 +370,7 @@ export class AutomationEngine {
 
         for (const asset of discoveredAssets.slice(0, 5)) {
           try {
-            const httpxResult = await ToolManager.execute('httpx', asset, jobId,
+            const httpxResult = await ToolManager.execute('httpx', [asset], jobId,
               () => ToolManager.polyfillHttpx(asset));
             if (httpxResult?.stdout) {
               const data = JSON.parse(httpxResult.stdout);
@@ -439,7 +454,7 @@ export class AutomationEngine {
                       const secretRes = await ai.models.generateContent({
                         model: 'gemini-1.5-pro',
                         contents: secretPrompt,
-                        config: { responseMimeType: 'application/json' }
+                        config: { responseMimeType: 'application/json' } as any
                       });
                       
                       if (secretRes.text) {
@@ -537,9 +552,41 @@ export class AutomationEngine {
         endpoints = Array.from(new Set(endpoints.map(e => JSON.stringify(e)))).map(s => JSON.parse(s));
         allFindings.push({ phase: 'Phase 3', type: 'Endpoints Discovered', count: endpoints.length });
 
+        // AI-Driven Security Interest Ranking
+        let rankedEndpoints: any[] = [];
+        if (ai && endpoints.length > 0) {
+          this.log(jobId, 'info', 'Phase 3.5: AI-Driven Security Interest Ranking');
+          const rankingPrompt = `Rank the following endpoints by security interest (likelihood of vulnerability).
+          Endpoints: ${JSON.stringify(endpoints.slice(0, 100))}
+          Tech Stack: ${MemoryManager.getMemory(jobId, hostname).tech.join(', ')}
+
+          Return JSON: { "ranked_endpoints": [ { "url": string, "method": string, "reason": string, "priority": number } ] }`;
+
+          try {
+            const rankingRes = await ai.models.generateContent({
+              model: 'gemini-1.5-pro',
+              contents: rankingPrompt,
+              config: { responseMimeType: 'application/json' } as any
+            });
+            if (rankingRes.text) {
+              const ranked = JSON.parse(rankingRes.text).ranked_endpoints;
+              rankedEndpoints = ranked;
+              this.log(jobId, 'info', `AI ranked ${ranked.length} endpoints for prioritized testing.`);
+              allFindings.push({ phase: 'Phase 3.5', type: 'AI Prioritization', data: ranked });
+            }
+          } catch (e) {}
+        }
+
         // --- PHASE 4: EXPLOITATION & PoC (VULNERABILITY VERIFICATION) ---
         this.updateJob(jobId, 'running', 'Phase 4: Exploitation');
-        this.log(jobId, 'info', 'Starting Phase 4: Autonomous AI-Driven Vulnerability Verification');
+        this.log(jobId, 'info', 'Starting Phase 4: Autonomous AI-Driven Vulnerability Verification (Prioritized & Chained)');
+
+        const memory = MemoryManager.getMemory(jobId, hostname);
+        const discoveredInfo = {
+          users: memory.discoveredUsers,
+          identifiers: memory.identifiers,
+          findings: memory.findings.map(f => f.type)
+        };
 
         // 1. Specialized Auditors (Auth, Business Logic, Sensitive Files)
         for (const stack of techStacks) {
@@ -582,7 +629,7 @@ export class AutomationEngine {
               const analysisRes = await ai.models.generateContent({
                 model: 'gemini-1.5-pro',
                 contents: analysisPrompt,
-                config: { responseMimeType: 'application/json' }
+                config: { responseMimeType: 'application/json' } as any
               });
 
               if (analysisRes.text) {
@@ -634,11 +681,32 @@ export class AutomationEngine {
           } catch (e) {}
         }
 
-        const highValueEndpoints = endpoints.filter(e => 
+        // Priority-based testing: combine AI-ranked with keyword-based high-value endpoints
+        const keywordEndpoints = endpoints.filter(e =>
           e.url.includes('api') || e.url.includes('admin') || e.url.includes('auth') || e.url.includes('?') || e.url.includes('login')
-        ).slice(0, 50); // Increased depth
+        );
 
-        for (const ep of highValueEndpoints) {
+        const combinedEndpoints = [
+          ...rankedEndpoints.map(re => ({ url: re.url, method: re.method || 'GET', priority: re.priority || 1 })),
+          ...keywordEndpoints.map(ke => ({ ...ke, priority: 2 }))
+        ];
+
+        // Deduplicate and sort by priority
+        const prioritizedEndpoints = Array.from(new Set(combinedEndpoints.map(e => e.url)))
+          .map(url => combinedEndpoints.find(e => e.url === url))
+          .sort((a, b) => (a?.priority || 10) - (b?.priority || 10))
+          .slice(0, 75); // Increased depth for comprehensive autonomous hunt
+
+        this.log(jobId, 'info', `Executing autonomous exploit chain on ${prioritizedEndpoints.length} prioritized endpoints.`, {
+          active_intelligence: {
+            users: discoveredInfo.users.length,
+            identifiers: Object.keys(discoveredInfo.identifiers).length,
+            prioritized_targets: prioritizedEndpoints.length
+          }
+        });
+
+        for (const ep of prioritizedEndpoints) {
+          if (!ep) continue;
           // IDOR Detection Logic
           const idMatch = ep.url.match(/\/(\d+)(?:\/|$|\?)/);
           if (idMatch) {
@@ -664,7 +732,7 @@ export class AutomationEngine {
                     const analysisRes = await ai.models.generateContent({
                       model: 'gemini-1.5-pro',
                       contents: analysisPrompt,
-                      config: { responseMimeType: 'application/json' }
+                      config: { responseMimeType: 'application/json' } as any
                     });
 
                     if (analysisRes.text) {
@@ -680,12 +748,13 @@ export class AutomationEngine {
             }
           }
 
-          const vulnTypes = ['SQLi', 'XSS', 'Path Traversal', 'SSRF', 'RCE', 'SSTI'];
-          const memory = MemoryManager.getMemory(jobId, hostname);
+          const vulnTypes = ['SQLi', 'XSS', 'Path Traversal', 'SSRF', 'RCE', 'SSTI', 'NoSQLi'];
           
           for (const type of vulnTypes) {
             try {
-              const customPayload = await PayloadOven.generateCustomPayload(ai, type, `Endpoint: ${ep.url}, Method: ${ep.method}, Tech: ${memory.tech.join(', ')}, Identifiers: ${JSON.stringify(memory.identifiers)}`);
+              // Enhanced context for AI-driven payload generation (Chaining discovered intel)
+              const aiContext = `Endpoint: ${ep.url}, Method: ${ep.method}, Tech: ${memory.tech.join(', ')}, Discovered Intel: ${JSON.stringify(discoveredInfo)}`;
+              const customPayload = await PayloadOven.generateCustomPayload(ai, type, aiContext);
               
               // Smart parameter replacement
               let testUrl = ep.url;
@@ -710,7 +779,7 @@ export class AutomationEngine {
 
               // Agentic AI Verification (Only if there's a trigger)
               if (ai && (isStatusDiff || isLatencySpike || hasErrorMarkers)) {
-                const analysisPrompt = `As an autonomous security agent (argila), analyze this HTTP interaction to find the exact security gap.
+                const analysisPrompt = `As an autonomous security agent (argila), analyze this HTTP interaction on ${hostname} to find the exact security gap.
                 Target URL: ${testUrl}
                 Payload: ${customPayload}
                 Vulnerability Type: ${type}
@@ -718,9 +787,10 @@ export class AutomationEngine {
                 Response Latency: ${latency}ms
                 Response Body (truncated): ${typeof res.data === 'string' ? res.data.substring(0, 2000) : JSON.stringify(res.data).substring(0, 2000)}
                 
+                [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+                [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+
                 Memory of Target Behavior:
-                - Tech Stack: ${memory.tech.join(', ')}
-                - Identifiers: ${JSON.stringify(memory.identifiers)}
                 - Discovered Users: ${memory.discoveredUsers.join(', ')}
                 - Previous Findings: ${JSON.stringify(memory.findings)}
                 
@@ -732,7 +802,7 @@ export class AutomationEngine {
                 const analysisRes = await ai.models.generateContent({
                   model: 'gemini-1.5-pro',
                   contents: analysisPrompt,
-                  config: { responseMimeType: 'application/json' }
+                  config: { responseMimeType: 'application/json' } as any
                 });
                 
                 if (analysisRes.text) {
@@ -766,7 +836,7 @@ export class AutomationEngine {
             const pocRes = await ai.models.generateContent({
               model: 'gemini-1.5-pro',
               contents: pocPrompt,
-              config: { responseMimeType: 'application/json' }
+              config: { responseMimeType: 'application/json' } as any
             });
             if (pocRes.text) {
               const pocData = JSON.parse(pocRes.text);
@@ -796,6 +866,8 @@ export class AutomationEngine {
       } catch (err: any) {
         this.log(jobId, 'error', `Hunt failed at ${err.message}`);
         this.updateJob(jobId, 'failed');
+      } finally {
+        this.activeJobs--;
       }
     }, 0);
 

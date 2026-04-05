@@ -93,7 +93,14 @@ async function startServer() {
 
     // Scope Check
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
-    const isAllowed = scopes.some(s => url.includes(s.domain));
+    const isAllowed = scopes.some(s => {
+      try {
+        const targetHost = new URL(url).hostname;
+        return targetHost === s.domain || targetHost.endsWith(`.${s.domain}`);
+      } catch (e) {
+        return false;
+      }
+    });
     
     if (scopes.length > 0 && !isAllowed) {
       return res.status(403).json({ error: 'Target domain not in scope' });
