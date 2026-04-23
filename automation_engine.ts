@@ -239,7 +239,7 @@ export class AutomationEngine {
         try {
           const res = await axios.get(`${asset}${ep}`, { validateStatus: () => true });
           // Only analyze if it actually returns JSON or product-like data
-          const isJson = res.headers['content-type']?.includes('application/json');
+          const isJson = String(res.headers['content-type'] ?? '').includes('application/json');
           const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
           const hasProductMarkers = bodyStr.includes('price') || bodyStr.includes('variant') || bodyStr.includes('sku');
 

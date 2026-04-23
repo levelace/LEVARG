@@ -27,9 +27,9 @@ export class StackGapAnalyzer {
       let errors: string[] = [];
 
       // 1. Header Analysis
-      const serverHeader = (headers['server'] || '').toLowerCase();
-      const poweredBy = (headers['x-powered-by'] || '').toLowerCase();
-      const via = (headers['via'] || '').toLowerCase();
+      const serverHeader = String(headers['server'] ?? '').toLowerCase();
+      const poweredBy = String(headers['x-powered-by'] ?? '').toLowerCase();
+      const via = String(headers['via'] ?? '').toLowerCase();
 
       // CDN / WAF / Auth
       if (headers['cf-ray'] || serverHeader.includes('cloudflare')) { cdn = 'Cloudflare'; waf = 'Cloudflare WAF'; }
