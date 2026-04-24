@@ -452,7 +452,7 @@ Headers: ${JSON.stringify(respHeaders)}
 Body: ${typeof respBody === 'string' ? respBody.substring(0, 5000) : JSON.stringify(respBody).substring(0, 5000)}`;
 
       const aiRes = await ai.models.generateContent({
-        model: 'gemini-1.5-flash',
+        model: 'gemini-2.5-flash',
         contents: prompt,
       });
 
