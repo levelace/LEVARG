@@ -449,7 +449,7 @@ Return a concise, bulleted technical summary formatted in Markdown.
 
 Status: ${status}
 Headers: ${JSON.stringify(respHeaders)}
-Body: ${typeof respBody === 'string' ? respBody.substring(0, 5000) : JSON.stringify(respBody).substring(0, 5000)}`;
+Body: ${typeof respBody === 'string' ? respBody.substring(0, 5000) : JSON.stringify(respBody ?? '').substring(0, 5000)}`;
 
       const aiRes = await ai.models.generateContent({
         model: 'gemini-2.5-flash',

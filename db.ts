@@ -1,9 +1,7 @@
 import Database from 'better-sqlite3';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const db = new Database(path.join(__dirname, 'pocforge.db'));
+const dbPath = process.env.DB_PATH || 'pocforge.db';
+const db = new Database(dbPath);
 
 // Initialize schema
 db.exec(`
