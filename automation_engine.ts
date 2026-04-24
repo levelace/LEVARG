@@ -309,9 +309,9 @@ export class AutomationEngine {
       .run(jobId, targetUrl, 'running', 'Phase 1: Reconnaissance');
 
     this.log(jobId, 'info', `Initialized Professional Methodology Hunt on ${targetUrl}`);
+    this.activeJobs++;
 
     setTimeout(async () => {
-      this.activeJobs++;
       try {
         const allFindings: any[] = [];
         const urlObj = new URL(targetUrl);

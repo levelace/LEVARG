@@ -11,14 +11,9 @@ export interface TargetMemory {
 export class MemoryManager {
   private static memory: Record<string, TargetMemory> = {};
 
-  private static memoryKey(jobId: string, host: string): string {
-    return `${jobId}::${host}`;
-  }
-
   static getMemory(jobId: string, host: string): TargetMemory {
-    const key = this.memoryKey(jobId, host);
-    if (!this.memory[key]) {
-      this.memory[key] = {
+    if (!this.memory[jobId]) {
+      this.memory[jobId] = {
         host,
         tech: [],
         identifiers: {},
@@ -28,7 +23,7 @@ export class MemoryManager {
         findings: []
       };
     }
-    return this.memory[key];
+    return this.memory[jobId];
   }
 
   static updateTech(jobId: string, host: string, tech: string[]) {
@@ -68,9 +63,6 @@ export class MemoryManager {
   }
 
   static clearMemory(jobId: string) {
-    const keysToDelete = Object.keys(this.memory).filter(k => k.startsWith(`${jobId}::`));
-    for (const key of keysToDelete) {
-      delete this.memory[key];
-    }
+    delete this.memory[jobId];
   }
 }
