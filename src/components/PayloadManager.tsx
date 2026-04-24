@@ -87,10 +87,8 @@ export default function PayloadManager() {
         contents: [{ role: 'user', parts: [{ text: prompt }] }],
       });
       
-      // Use the proper property access for the SDK
-      const responseText = (result as any).response.text();
-      if (responseText) {
-        setNewPayload({ ...newPayload, content: responseText.trim() });
+      if (result.text) {
+        setNewPayload({ ...newPayload, content: result.text.trim() });
       }
     } catch (err: any) {
       console.error('AI Generation failed:', err);

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Save, Copy, Terminal, FlaskConical, AlertCircle, Clock, Database, Sparkles, History, Plus } from 'lucide-react';
 import Markdown from 'react-markdown';
-import { GoogleGenAI } from '@google/genai';
 
 export default function RequestLab({ initialRequest }: { initialRequest?: any }) {
   const [method, setMethod] = useState('GET');
@@ -94,29 +93,20 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
     if (!response) return;
     setAnalyzing(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
-      const prompt = `Analyze this HTTP response for potential security vulnerabilities. 
-      Focus on:
-      1. Missing security headers
-      2. Information disclosure
-      3. Reflected input or XSS vectors
-      4. Server errors indicating SQLi/RCE
-      Return a concise, bulleted technical summary formatted in Markdown.
-      
-      Status: ${response.status}
-      Headers: ${JSON.stringify(response.headers)}
-      Body: ${typeof response.body === 'string' ? response.body.substring(0, 5000) : JSON.stringify(response.body).substring(0, 5000)}`;
-      
-      const aiResponse = await ai.models.generateContent({
-        // FIX: was 'gemini-3-flash-preview' which is an invalid model string
-        model: 'gemini-1.5-flash',
-        contents: prompt,
+      const res = await fetch('/api/ai/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: response.status,
+          headers: response.headers,
+          body: response.body
+        })
       });
-      
-      if (aiResponse.text) {
-        setAiAnalysis(aiResponse.text);
+      const data = await res.json();
+      if (res.ok && data.analysis) {
+        setAiAnalysis(data.analysis);
       } else {
-        setError("Failed to generate analysis.");
+        setError(data.error || 'Failed to generate analysis.');
       }
     } catch (err: any) {
       setError(err.message);

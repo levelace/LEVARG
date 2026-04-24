@@ -74,8 +74,12 @@ export class ToolManager {
       if (def.npxPackage) {
         return { method: 'NPX' as ExecutionMethod };
       }
-      // 3. Fallback to Polyfill (if we have logic for it)
-      return { method: 'POLYFILL' as ExecutionMethod };
+      // 3. Fallback to Polyfill only for tools that have an implementation
+      const polyfillTools = ['nmap', 'subfinder', 'whatweb', 'httpx'];
+      if (polyfillTools.includes(def.name)) {
+        return { method: 'POLYFILL' as ExecutionMethod };
+      }
+      return { method: 'UNAVAILABLE' as ExecutionMethod };
     }
   }
 

@@ -66,7 +66,13 @@ export class AutomationEngine {
   }
 
   private static async updateJob(jobId: string, status: string, phase?: string, findings?: any[]) {
-    if (phase) {
+    if (status === 'completed' || status === 'failed') {
+      if (phase) {
+        db.prepare('UPDATE automation_jobs SET status = ?, phase = ?, completed_at = ? WHERE id = ?').run(status, phase, new Date().toISOString(), jobId);
+      } else {
+        db.prepare('UPDATE automation_jobs SET status = ?, completed_at = ? WHERE id = ?').run(status, new Date().toISOString(), jobId);
+      }
+    } else if (phase) {
       db.prepare('UPDATE automation_jobs SET status = ?, phase = ? WHERE id = ?').run(status, phase, jobId);
     } else {
       db.prepare('UPDATE automation_jobs SET status = ? WHERE id = ?').run(status, jobId);
@@ -281,7 +287,6 @@ export class AutomationEngine {
     if (this.activeJobs >= 2) {
       throw new Error('Maximum concurrent jobs (2) reached. Please wait for a job to complete.');
     }
-    this.activeJobs++;
     const jobId = uuidv4();
     const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
     const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
@@ -306,6 +311,7 @@ export class AutomationEngine {
     this.log(jobId, 'info', `Initialized Professional Methodology Hunt on ${targetUrl}`);
 
     setTimeout(async () => {
+      this.activeJobs++;
       try {
         const allFindings: any[] = [];
         const urlObj = new URL(targetUrl);

@@ -5,6 +5,7 @@ import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { createServer as createViteServer } from 'vite';
+import { GoogleGenAI } from '@google/genai';
 import db from './db.js';
 import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 import { AutomationEngine } from './automation_engine.js';
@@ -24,13 +25,8 @@ async function startServer() {
     next();
   });
 
-  // Root route for connectivity check
-  app.get('/', (req, res, next) => {
-    if (req.url === '/' || req.url === '/index.html') {
-      return next(); // Let Vite handle it
-    }
-    next();
-  });
+  // Root route — let Vite/static handler serve the SPA
+  app.get('/', (req, res, next) => next());
 
   app.get('/health', (req, res) => {
     res.send('OK');
@@ -239,6 +235,23 @@ async function startServer() {
       if (!flow) return res.status(404).json({ error: 'Flow not found' });
       
       const steps = JSON.parse(flow.steps);
+
+      // Scope Check — every step URL must be in scope
+      const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
+      if (scopes.length > 0) {
+        for (const step of steps) {
+          const allowed = scopes.some(s => {
+            try {
+              const h = new URL(step.url).hostname;
+              return h === s.domain || h.endsWith(`.${s.domain}`);
+            } catch { return false; }
+          });
+          if (!allowed) {
+            return res.status(403).json({ error: `Step URL not in scope: ${step.url}` });
+          }
+        }
+      }
+
       const results = [];
       
       for (const step of steps) {
@@ -278,6 +291,21 @@ async function startServer() {
   // Fuzzing Engine
   app.post('/api/scans', async (req, res) => {
     const { targetUrl, payloadSetId, method, headers, body } = req.body;
+
+    // Scope Check
+    const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
+    const isAllowed = scopes.some(s => {
+      try {
+        const targetHost = new URL(targetUrl).hostname;
+        return targetHost === s.domain || targetHost.endsWith(`.${s.domain}`);
+      } catch (e) {
+        return false;
+      }
+    });
+    if (scopes.length > 0 && !isAllowed) {
+      return res.status(403).json({ error: 'Target domain not in scope' });
+    }
+
     const scanId = uuidv4();
     
     db.prepare('INSERT INTO scans (id, target_url, payload_set_id, status) VALUES (?, ?, ?, ?)').run(scanId, targetUrl, payloadSetId, 'running');
@@ -395,6 +423,47 @@ async function startServer() {
   app.get('/api/automation/jobs/:id/logs', (req, res) => {
     const logs = db.prepare('SELECT * FROM automation_logs WHERE job_id = ? ORDER BY created_at ASC').all(req.params.id);
     res.json(logs.map((l: any) => ({ ...l, data: l.data ? JSON.parse(l.data) : null })));
+  });
+
+  // AI Analysis (server-side proxy so API key stays on the backend)
+  app.post('/api/ai/analyze', async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ error: 'AI analysis unavailable — no API key configured' });
+    }
+
+    const { status, headers: respHeaders, body: respBody } = req.body;
+    if (status === undefined) {
+      return res.status(400).json({ error: 'Missing required field: status' });
+    }
+
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `Analyze this HTTP response for potential security vulnerabilities.
+Focus on:
+1. Missing security headers
+2. Information disclosure
+3. Reflected input or XSS vectors
+4. Server errors indicating SQLi/RCE
+Return a concise, bulleted technical summary formatted in Markdown.
+
+Status: ${status}
+Headers: ${JSON.stringify(respHeaders)}
+Body: ${typeof respBody === 'string' ? respBody.substring(0, 5000) : JSON.stringify(respBody).substring(0, 5000)}`;
+
+      const aiRes = await ai.models.generateContent({
+        model: 'gemini-1.5-flash',
+        contents: prompt,
+      });
+
+      if (aiRes.text) {
+        res.json({ analysis: aiRes.text });
+      } else {
+        res.status(500).json({ error: 'AI returned empty response' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
   });
 
   // Tools Status

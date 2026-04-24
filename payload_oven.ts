@@ -221,8 +221,6 @@ export class PayloadOven {
       });
     }
     return payloads;
-    
-    return payloads;
   }
 
   static getAllCategories(): string[] {
