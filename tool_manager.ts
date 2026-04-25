@@ -1,5 +1,8 @@
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
+import { existsSync, mkdirSync } from 'fs';
+import { readdir } from 'fs/promises';
+import path from 'path';
 import portscanner from 'portscanner';
 import axios from 'axios';
 import { StackGapAnalyzer } from './stack_gap_analyzer.js';
@@ -34,8 +37,13 @@ const spawnAsync = (command: string, args: string[]): Promise<{ stdout: string; 
   });
 };
 
-export type ToolCategory = 'Recon' | 'Fingerprinting' | 'Discovery' | 'Vulnerability' | 'Exploitation';
+export type ToolCategory = 'Recon' | 'Fingerprinting' | 'Discovery' | 'Vulnerability' | 'Exploitation' | 'Utility';
 export type ExecutionMethod = 'BINARY' | 'NPX' | 'POLYFILL' | 'UNAVAILABLE';
+
+export interface InstallMethod {
+  label: string;
+  command: string;
+}
 
 interface ToolDefinition {
   name: string;
@@ -44,39 +52,333 @@ interface ToolDefinition {
   binaryName: string;
   npxPackage?: string;
   description: string;
+  versionFlag: string;
+  installMethods: InstallMethod[];
 }
 
+export interface ResourceDefinition {
+  name: string;
+  type: 'wordlist' | 'templates';
+  description: string;
+  defaultPath: string;
+  installMethods: InstallMethod[];
+  verifyPath: string;
+}
+
+// --- Centralized paths ---
+const TOOLS_HOME = process.env.LEVARG_TOOLS_HOME || path.join(process.env.HOME || '/root', '.levarg');
+const WORDLISTS_DIR = path.join(TOOLS_HOME, 'wordlists');
+const TEMPLATES_DIR = path.join(TOOLS_HOME, 'templates');
+
 export const TOOL_DEFINITIONS: ToolDefinition[] = [
-  { name: 'nmap', category: 'Recon', phase: 1, binaryName: 'nmap', description: 'Network exploration and port scanning' },
-  { name: 'subfinder', category: 'Recon', phase: 1, binaryName: 'subfinder', description: 'Passive subdomain discovery' },
-  { name: 'amass', category: 'Recon', phase: 1, binaryName: 'amass', description: 'In-depth attack surface mapping' },
-  { name: 'whatweb', category: 'Fingerprinting', phase: 2, binaryName: 'whatweb', description: 'Web technology identifier' },
-  { name: 'ffuf', category: 'Discovery', phase: 3, binaryName: 'ffuf', npxPackage: 'ffuf', description: 'Fast web fuzzer' },
-  { name: 'dirb', category: 'Discovery', phase: 3, binaryName: 'dirb', description: 'Web content scanner' },
-  { name: 'nuclei', category: 'Vulnerability', phase: 4, binaryName: 'nuclei', description: 'Template-based vulnerability scanner' },
-  { name: 'sqlmap', category: 'Exploitation', phase: 4, binaryName: 'sqlmap', description: 'Automatic SQL injection tool' },
-  { name: 'httpx', category: 'Fingerprinting', phase: 2, binaryName: 'httpx', description: 'Fast and multi-purpose HTTP toolkit' }
+  // --- Utility (pdtm first — it can install everything from ProjectDiscovery) ---
+  {
+    name: 'pdtm', category: 'Utility', phase: 0, binaryName: 'pdtm',
+    description: 'ProjectDiscovery Tool Manager — installs & updates all PD tools',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'go install (latest)', command: 'go install -v github.com/projectdiscovery/pdtm/cmd/pdtm@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/projectdiscovery/pdtm/releases/latest/download/pdtm_linux_amd64.zip -o /tmp/pdtm.zip && unzip -o /tmp/pdtm.zip -d /usr/local/bin && rm /tmp/pdtm.zip' },
+      { label: 'curl (Linux arm64)', command: 'curl -sL https://github.com/projectdiscovery/pdtm/releases/latest/download/pdtm_linux_arm64.zip -o /tmp/pdtm.zip && unzip -o /tmp/pdtm.zip -d /usr/local/bin && rm /tmp/pdtm.zip' },
+      { label: 'curl (macOS amd64)', command: 'curl -sL https://github.com/projectdiscovery/pdtm/releases/latest/download/pdtm_macOS_amd64.zip -o /tmp/pdtm.zip && unzip -o /tmp/pdtm.zip -d /usr/local/bin && rm /tmp/pdtm.zip' },
+      { label: 'curl (macOS arm64)', command: 'curl -sL https://github.com/projectdiscovery/pdtm/releases/latest/download/pdtm_macOS_arm64.zip -o /tmp/pdtm.zip && unzip -o /tmp/pdtm.zip -d /usr/local/bin && rm /tmp/pdtm.zip' },
+    ]
+  },
+  // --- Recon ---
+  {
+    name: 'nmap', category: 'Recon', phase: 1, binaryName: 'nmap',
+    description: 'Network exploration and port scanning',
+    versionFlag: '--version',
+    installMethods: [
+      { label: 'apt (Debian/Ubuntu)', command: 'sudo apt-get install -y nmap' },
+      { label: 'brew (macOS)', command: 'brew install nmap' },
+      { label: 'pacman (Arch)', command: 'sudo pacman -S nmap' },
+    ]
+  },
+  {
+    name: 'subfinder', category: 'Recon', phase: 1, binaryName: 'subfinder',
+    description: 'Passive subdomain discovery',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install subfinder' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/projectdiscovery/subfinder/releases/latest/download/subfinder_linux_amd64.zip -o /tmp/subfinder.zip && unzip -o /tmp/subfinder.zip -d /usr/local/bin && rm /tmp/subfinder.zip' },
+    ]
+  },
+  {
+    name: 'amass', category: 'Recon', phase: 1, binaryName: 'amass',
+    description: 'In-depth attack surface mapping',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'go install', command: 'go install -v github.com/owasp-amass/amass/v4/...@master' },
+      { label: 'apt (Kali/Ubuntu)', command: 'sudo apt-get install -y amass' },
+      { label: 'brew (macOS)', command: 'brew install amass' },
+      { label: 'snap', command: 'sudo snap install amass' },
+    ]
+  },
+  {
+    name: 'naabu', category: 'Recon', phase: 1, binaryName: 'naabu',
+    description: 'Fast port scanner (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install naabu' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/projectdiscovery/naabu/releases/latest/download/naabu_linux_amd64.zip -o /tmp/naabu.zip && unzip -o /tmp/naabu.zip -d /usr/local/bin && rm /tmp/naabu.zip' },
+    ]
+  },
+  {
+    name: 'dnsx', category: 'Recon', phase: 1, binaryName: 'dnsx',
+    description: 'Fast DNS toolkit (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install dnsx' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest' },
+    ]
+  },
+  {
+    name: 'uncover', category: 'Recon', phase: 1, binaryName: 'uncover',
+    description: 'API-powered host discovery (Shodan, Censys, Fofa)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install uncover' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/uncover/cmd/uncover@latest' },
+    ]
+  },
+  // --- Fingerprinting ---
+  {
+    name: 'httpx', category: 'Fingerprinting', phase: 2, binaryName: 'httpx',
+    description: 'Fast multi-purpose HTTP toolkit (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install httpx' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/projectdiscovery/httpx/releases/latest/download/httpx_linux_amd64.zip -o /tmp/httpx.zip && unzip -o /tmp/httpx.zip -d /usr/local/bin && rm /tmp/httpx.zip' },
+    ]
+  },
+  {
+    name: 'whatweb', category: 'Fingerprinting', phase: 2, binaryName: 'whatweb',
+    description: 'Web technology identifier',
+    versionFlag: '--version',
+    installMethods: [
+      { label: 'apt (Debian/Ubuntu)', command: 'sudo apt-get install -y whatweb' },
+      { label: 'brew (macOS)', command: 'brew install whatweb' },
+      { label: 'gem', command: 'gem install whatweb' },
+    ]
+  },
+  {
+    name: 'tlsx', category: 'Fingerprinting', phase: 2, binaryName: 'tlsx',
+    description: 'TLS data gatherer (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install tlsx' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest' },
+    ]
+  },
+  // --- Discovery ---
+  {
+    name: 'ffuf', category: 'Discovery', phase: 3, binaryName: 'ffuf', npxPackage: 'ffuf',
+    description: 'Fast web fuzzer',
+    versionFlag: '-V',
+    installMethods: [
+      { label: 'go install', command: 'go install -v github.com/ffuf/ffuf/v2@latest' },
+      { label: 'apt (Kali/Ubuntu)', command: 'sudo apt-get install -y ffuf' },
+      { label: 'brew (macOS)', command: 'brew install ffuf' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/ffuf/ffuf/releases/latest/download/ffuf_linux_amd64.tar.gz | tar xz -C /usr/local/bin' },
+    ]
+  },
+  {
+    name: 'dirb', category: 'Discovery', phase: 3, binaryName: 'dirb',
+    description: 'Web content scanner',
+    versionFlag: '-h',
+    installMethods: [
+      { label: 'apt (Debian/Ubuntu)', command: 'sudo apt-get install -y dirb' },
+    ]
+  },
+  {
+    name: 'katana', category: 'Discovery', phase: 3, binaryName: 'katana',
+    description: 'Next-gen web crawler (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install katana' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/katana/cmd/katana@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/projectdiscovery/katana/releases/latest/download/katana_linux_amd64.zip -o /tmp/katana.zip && unzip -o /tmp/katana.zip -d /usr/local/bin && rm /tmp/katana.zip' },
+    ]
+  },
+  {
+    name: 'gau', category: 'Discovery', phase: 3, binaryName: 'gau',
+    description: 'Fetch known URLs from AlienVault, Wayback, Common Crawl',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'go install', command: 'go install -v github.com/lc/gau/v2/cmd/gau@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/lc/gau/releases/latest/download/gau_linux_amd64.tar.gz | tar xz -C /usr/local/bin' },
+    ]
+  },
+  {
+    name: 'gobuster', category: 'Discovery', phase: 3, binaryName: 'gobuster',
+    description: 'Directory / DNS / vhost brute-forcer',
+    versionFlag: 'version',
+    installMethods: [
+      { label: 'go install', command: 'go install -v github.com/OJ/gobuster/v3@latest' },
+      { label: 'apt (Kali/Ubuntu)', command: 'sudo apt-get install -y gobuster' },
+      { label: 'brew (macOS)', command: 'brew install gobuster' },
+    ]
+  },
+  // --- Vulnerability ---
+  {
+    name: 'nuclei', category: 'Vulnerability', phase: 4, binaryName: 'nuclei',
+    description: 'Template-based vulnerability scanner (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install nuclei' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest' },
+      { label: 'curl (Linux amd64)', command: 'curl -sL https://github.com/projectdiscovery/nuclei/releases/latest/download/nuclei_linux_amd64.zip -o /tmp/nuclei.zip && unzip -o /tmp/nuclei.zip -d /usr/local/bin && rm /tmp/nuclei.zip' },
+      { label: 'brew (macOS)', command: 'brew install nuclei' },
+    ]
+  },
+  {
+    name: 'dalfox', category: 'Vulnerability', phase: 4, binaryName: 'dalfox',
+    description: 'XSS scanner and parameter analysis',
+    versionFlag: 'version',
+    installMethods: [
+      { label: 'go install', command: 'go install -v github.com/hahwul/dalfox/v2@latest' },
+      { label: 'brew (macOS)', command: 'brew install dalfox' },
+      { label: 'snap', command: 'sudo snap install dalfox' },
+    ]
+  },
+  {
+    name: 'nikto', category: 'Vulnerability', phase: 4, binaryName: 'nikto',
+    description: 'Web server vulnerability scanner',
+    versionFlag: '-Version',
+    installMethods: [
+      { label: 'apt (Debian/Ubuntu)', command: 'sudo apt-get install -y nikto' },
+      { label: 'brew (macOS)', command: 'brew install nikto' },
+    ]
+  },
+  {
+    name: 'interactsh-client', category: 'Vulnerability', phase: 4, binaryName: 'interactsh-client',
+    description: 'OOB interaction detection (ProjectDiscovery)',
+    versionFlag: '-version',
+    installMethods: [
+      { label: 'pdtm', command: 'pdtm -install interactsh-client' },
+      { label: 'go install', command: 'go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest' },
+    ]
+  },
+  // --- Exploitation ---
+  {
+    name: 'sqlmap', category: 'Exploitation', phase: 4, binaryName: 'sqlmap',
+    description: 'Automatic SQL injection and database takeover tool',
+    versionFlag: '--version',
+    installMethods: [
+      { label: 'pip', command: 'pip install sqlmap' },
+      { label: 'apt (Debian/Ubuntu)', command: 'sudo apt-get install -y sqlmap' },
+      { label: 'brew (macOS)', command: 'brew install sqlmap' },
+      { label: 'git clone', command: 'git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap && ln -sf /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap' },
+    ]
+  },
+];
+
+// --- Wordlists & Templates (centralized resources) ---
+export const RESOURCE_DEFINITIONS: ResourceDefinition[] = [
+  {
+    name: 'SecLists',
+    type: 'wordlist',
+    description: 'Collection of security-related fuzzing lists (usernames, passwords, URLs, payloads, web shells, etc.)',
+    defaultPath: path.join(WORDLISTS_DIR, 'SecLists'),
+    verifyPath: path.join(WORDLISTS_DIR, 'SecLists', 'Discovery'),
+    installMethods: [
+      { label: 'git clone (latest)', command: `git clone --depth 1 https://github.com/danielmiessler/SecLists.git ${path.join(WORDLISTS_DIR, 'SecLists')}` },
+      { label: 'curl + extract', command: `mkdir -p ${WORDLISTS_DIR} && curl -sL https://github.com/danielmiessler/SecLists/archive/refs/heads/master.tar.gz | tar xz -C ${WORDLISTS_DIR} && mv ${path.join(WORDLISTS_DIR, 'SecLists-master')} ${path.join(WORDLISTS_DIR, 'SecLists')}` },
+      { label: 'apt (Kali)', command: 'sudo apt-get install -y seclists' },
+    ]
+  },
+  {
+    name: 'Nuclei Templates',
+    type: 'templates',
+    description: 'Community-curated vulnerability templates for Nuclei scanner',
+    defaultPath: path.join(TEMPLATES_DIR, 'nuclei-templates'),
+    verifyPath: path.join(TEMPLATES_DIR, 'nuclei-templates', 'http'),
+    installMethods: [
+      { label: 'nuclei -update-templates', command: `nuclei -update-templates -td ${path.join(TEMPLATES_DIR, 'nuclei-templates')}` },
+      { label: 'git clone (latest)', command: `git clone --depth 1 https://github.com/projectdiscovery/nuclei-templates.git ${path.join(TEMPLATES_DIR, 'nuclei-templates')}` },
+      { label: 'curl + extract', command: `mkdir -p ${TEMPLATES_DIR} && curl -sL https://github.com/projectdiscovery/nuclei-templates/archive/refs/heads/main.tar.gz | tar xz -C ${TEMPLATES_DIR} && mv ${path.join(TEMPLATES_DIR, 'nuclei-templates-main')} ${path.join(TEMPLATES_DIR, 'nuclei-templates')}` },
+    ]
+  },
+  {
+    name: 'Fuzzing Templates',
+    type: 'templates',
+    description: 'Nuclei fuzzing templates for web vulnerability discovery',
+    defaultPath: path.join(TEMPLATES_DIR, 'fuzzing-templates'),
+    verifyPath: path.join(TEMPLATES_DIR, 'fuzzing-templates'),
+    installMethods: [
+      { label: 'git clone (latest)', command: `git clone --depth 1 https://github.com/projectdiscovery/fuzzing-templates.git ${path.join(TEMPLATES_DIR, 'fuzzing-templates')}` },
+    ]
+  },
+  {
+    name: 'PayloadsAllTheThings',
+    type: 'wordlist',
+    description: 'Comprehensive payload collection for web security testing',
+    defaultPath: path.join(WORDLISTS_DIR, 'PayloadsAllTheThings'),
+    verifyPath: path.join(WORDLISTS_DIR, 'PayloadsAllTheThings', 'SQL Injection'),
+    installMethods: [
+      { label: 'git clone (latest)', command: `git clone --depth 1 https://github.com/swisskyrepo/PayloadsAllTheThings.git ${path.join(WORDLISTS_DIR, 'PayloadsAllTheThings')}` },
+    ]
+  },
 ];
 
 export class ToolManager {
-  private static statusCache: Record<string, { method: ExecutionMethod, version?: string }> = {};
+  private static statusCache: Record<string, { method: ExecutionMethod; version?: string }> = {};
 
-  static async getToolStatus(toolName: string) {
+  static getToolsHome() { return TOOLS_HOME; }
+  static getWordlistsDir() { return WORDLISTS_DIR; }
+  static getTemplatesDir() { return TEMPLATES_DIR; }
+
+  static async getToolStatus(toolName: string): Promise<{ method: ExecutionMethod; version?: string }> {
+    if (this.statusCache[toolName]) return this.statusCache[toolName];
+
     const def = TOOL_DEFINITIONS.find(t => t.name === toolName);
-    if (!def) return { method: 'UNAVAILABLE' as ExecutionMethod };
+    if (!def) return { method: 'UNAVAILABLE' };
 
-    // 1. Check for System Binary
+    // 1. Check for system binary and get version
     try {
-      await execAsync(`which ${def.binaryName}`);
-      return { method: 'BINARY' as ExecutionMethod };
-    } catch (e) {
-      // 2. Check for NPX capability (if defined)
-      if (def.npxPackage) {
-        return { method: 'NPX' as ExecutionMethod };
+      const { stdout: whichOut } = await execAsync(`which ${def.binaryName}`);
+      if (whichOut.trim()) {
+        let version: string | undefined;
+        try {
+          const { stdout, stderr } = await execAsync(`${def.binaryName} ${def.versionFlag} 2>&1`, { timeout: 5000 });
+          const raw = (stdout || stderr).trim();
+          const vMatch = raw.match(/v?(\d+\.\d+[\.\d]*)/);
+          version = vMatch ? vMatch[1] : raw.substring(0, 60);
+        } catch { /* version detection failed, tool still exists */ }
+        const result = { method: 'BINARY' as ExecutionMethod, version };
+        this.statusCache[toolName] = result;
+        return result;
       }
-      // 3. Fallback to Polyfill (if we have logic for it)
-      return { method: 'POLYFILL' as ExecutionMethod };
+    } catch {
+      // not found via which
     }
+
+    // 2. Check ~/go/bin (common go install location)
+    try {
+      const goPath = path.join(process.env.HOME || '/root', 'go', 'bin', def.binaryName);
+      await execAsync(`test -x ${goPath}`);
+      let version: string | undefined;
+      try {
+        const { stdout } = await execAsync(`${goPath} ${def.versionFlag} 2>&1`, { timeout: 5000 });
+        const vMatch = stdout.match(/v?(\d+\.\d+[\.\d]*)/);
+        version = vMatch ? vMatch[1] : undefined;
+      } catch {}
+      const result = { method: 'BINARY' as ExecutionMethod, version };
+      this.statusCache[toolName] = result;
+      return result;
+    } catch {}
+
+    // 3. NPX fallback
+    if (def.npxPackage) {
+      return { method: 'NPX' };
+    }
+
+    // 4. Polyfill fallback
+    return { method: 'POLYFILL' };
   }
 
   static async getAllStatus() {
@@ -87,11 +389,113 @@ export class ToolManager {
         name: def.name,
         category: def.category,
         phase: `Phase ${def.phase}`,
-        status: status.method !== 'UNAVAILABLE' ? 'available' : 'missing',
-        method: status.method
+        description: def.description,
+        status: status.method === 'BINARY' ? 'installed' : status.method === 'UNAVAILABLE' ? 'missing' : 'fallback',
+        method: status.method,
+        version: status.version || null,
+        installMethods: def.installMethods
       });
     }
     return results;
+  }
+
+  static clearCache() { this.statusCache = {}; }
+
+  // --- Resource (Wordlist / Template) status ---
+  static async getResourceStatus() {
+    const results = [];
+    for (const res of RESOURCE_DEFINITIONS) {
+      const installed = existsSync(res.verifyPath);
+      let size: string | null = null;
+      if (installed) {
+        try {
+          const { stdout } = await execAsync(`du -sh ${res.defaultPath} 2>/dev/null`);
+          size = stdout.split('\t')[0]?.trim() || null;
+        } catch {}
+      }
+      results.push({
+        name: res.name,
+        type: res.type,
+        description: res.description,
+        installed,
+        path: res.defaultPath,
+        size,
+        installMethods: res.installMethods,
+      });
+    }
+    return results;
+  }
+
+  static async getResourceContents(resourceName: string, subpath?: string): Promise<string[]> {
+    const res = RESOURCE_DEFINITIONS.find(r => r.name === resourceName);
+    if (!res) return [];
+    const target = subpath ? path.join(res.defaultPath, subpath) : res.defaultPath;
+    if (!existsSync(target)) return [];
+    try {
+      const entries = await readdir(target, { withFileTypes: true });
+      return entries.map(e => (e.isDirectory() ? `${e.name}/` : e.name)).sort();
+    } catch { return []; }
+  }
+
+  // --- Install tool or resource ---
+  static async installTool(toolName: string, methodIndex: number): Promise<{ success: boolean; output: string }> {
+    const def = TOOL_DEFINITIONS.find(t => t.name === toolName);
+    if (!def) return { success: false, output: `Unknown tool: ${toolName}` };
+    const method = def.installMethods[methodIndex];
+    if (!method) return { success: false, output: `Invalid install method index: ${methodIndex}` };
+
+    try {
+      const { stdout, stderr } = await execAsync(method.command, { timeout: 300_000 });
+      this.clearCache();
+      return { success: true, output: (stdout + '\n' + stderr).trim() };
+    } catch (err: any) {
+      return { success: false, output: err.message || 'Install failed' };
+    }
+  }
+
+  static async installResource(resourceName: string, methodIndex: number): Promise<{ success: boolean; output: string }> {
+    const res = RESOURCE_DEFINITIONS.find(r => r.name === resourceName);
+    if (!res) return { success: false, output: `Unknown resource: ${resourceName}` };
+    const method = res.installMethods[methodIndex];
+    if (!method) return { success: false, output: `Invalid install method index: ${methodIndex}` };
+
+    // ensure parent dirs exist
+    const parentDir = path.dirname(res.defaultPath);
+    if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
+
+    try {
+      const { stdout, stderr } = await execAsync(method.command, { timeout: 600_000 });
+      return { success: true, output: (stdout + '\n' + stderr).trim() };
+    } catch (err: any) {
+      return { success: false, output: err.message || 'Install failed' };
+    }
+  }
+
+  // --- Install ALL missing tools via pdtm (batch) ---
+  static async pdtmInstallAll(): Promise<{ success: boolean; output: string }> {
+    const pdtmStatus = await this.getToolStatus('pdtm');
+    if (pdtmStatus.method !== 'BINARY') {
+      return { success: false, output: 'pdtm is not installed. Install pdtm first to batch-install ProjectDiscovery tools.' };
+    }
+
+    const pdTools = TOOL_DEFINITIONS.filter(t =>
+      t.installMethods.some(m => m.label === 'pdtm') && t.name !== 'pdtm'
+    );
+
+    const results: string[] = [];
+    for (const tool of pdTools) {
+      const status = await this.getToolStatus(tool.name);
+      if (status.method === 'BINARY') continue;
+      try {
+        const { stdout, stderr } = await execAsync(`pdtm -install ${tool.name}`, { timeout: 120_000 });
+        results.push(`${tool.name}: OK`);
+      } catch (err: any) {
+        results.push(`${tool.name}: FAILED — ${err.message}`);
+      }
+    }
+
+    this.clearCache();
+    return { success: true, output: results.length > 0 ? results.join('\n') : 'All ProjectDiscovery tools already installed.' };
   }
 
   /**
@@ -133,18 +537,15 @@ export class ToolManager {
   }
 
   static async polyfillSubdomainDiscovery(hostname: string) {
-    // Check for wildcard DNS first
     const wildcardSub = `wildcard-check-${Math.random().toString(36).substring(7)}.${hostname}`;
     let isWildcard = false;
     try {
-      // Check both 80 and 443 to be sure
       const port80 = await portscanner.checkPortStatus(80, wildcardSub).catch(() => 'closed');
       const port443 = await portscanner.checkPortStatus(443, wildcardSub).catch(() => 'closed');
       
       if (port80 === 'open' || port443 === 'open') {
         isWildcard = true;
       } else {
-        // Fallback to HTTP check
         const res = await axios.get(`http://${wildcardSub}`, { timeout: 2000, validateStatus: () => true }).catch(() => null);
         if (res && res.status !== 404) isWildcard = true;
       }

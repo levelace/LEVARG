@@ -1,4 +1,5 @@
 
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import cors from 'cors';
@@ -10,6 +11,7 @@ import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 import { AutomationEngine } from './automation_engine.js';
 
 import { ToolManager } from './tool_manager.js';
+import { OllamaClient } from './ollama_client.js';
 
 async function startServer() {
   const app = express();
@@ -397,7 +399,38 @@ async function startServer() {
     res.json(logs.map((l: any) => ({ ...l, data: l.data ? JSON.parse(l.data) : null })));
   });
 
-  // Tools Status
+  // --- AI Proxy Endpoints (Ollama — local, free, no API key) ---
+  app.post('/api/ai/generate-payloads', async (req, res) => {
+    const { name, type } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    const ollama = new OllamaClient();
+    const prompt = `Generate a list of 20 highly effective security testing payloads for the following scenario: ${name}.\nThe payload type is: ${type || 'fuzzing'}.\nReturn ONLY the payloads, one per line. Do not include markdown formatting, numbers, or explanations.`;
+    const content = await ollama.generate(prompt);
+    if (content) {
+      res.json({ content });
+    } else {
+      res.status(500).json({ error: 'Ollama is not reachable. Make sure Ollama is running (ollama serve).' });
+    }
+  });
+
+  app.post('/api/ai/analyze-response', async (req, res) => {
+    const { status, headers, body } = req.body;
+    try {
+      const ollama = new OllamaClient();
+      const bodyStr = typeof body === 'string' ? body.substring(0, 5000) : JSON.stringify(body ?? '').substring(0, 5000);
+      const prompt = `Analyze this HTTP response for potential security vulnerabilities.\nFocus on:\n1. Missing security headers\n2. Information disclosure\n3. Reflected input or XSS vectors\n4. Server errors indicating SQLi/RCE\nReturn a concise, bulleted technical summary formatted in Markdown.\n\nStatus: ${status}\nHeaders: ${JSON.stringify(headers)}\nBody: ${bodyStr}`;
+      const analysis = await ollama.generate(prompt);
+      if (analysis) {
+        res.json({ analysis });
+      } else {
+        res.status(500).json({ error: 'Ollama is not reachable. Make sure Ollama is running (ollama serve).' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Tools & Resources API ---
   app.get('/api/tools/status', async (req, res) => {
     try {
       const statuses = await ToolManager.getAllStatus();
@@ -405,6 +438,42 @@ async function startServer() {
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  app.post('/api/tools/install', async (req, res) => {
+    const { toolName, methodIndex } = req.body;
+    if (!toolName || methodIndex === undefined) return res.status(400).json({ error: 'toolName and methodIndex required' });
+    const result = await ToolManager.installTool(toolName, methodIndex);
+    ToolManager.clearCache();
+    res.json(result);
+  });
+
+  app.post('/api/tools/pdtm-install-all', async (_req, res) => {
+    const result = await ToolManager.pdtmInstallAll();
+    res.json(result);
+  });
+
+  app.get('/api/resources/status', async (_req, res) => {
+    try {
+      const statuses = await ToolManager.getResourceStatus();
+      res.json(statuses);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/resources/install', async (req, res) => {
+    const { resourceName, methodIndex } = req.body;
+    if (!resourceName || methodIndex === undefined) return res.status(400).json({ error: 'resourceName and methodIndex required' });
+    const result = await ToolManager.installResource(resourceName, methodIndex);
+    res.json(result);
+  });
+
+  app.get('/api/resources/browse', async (req, res) => {
+    const { name, subpath } = req.query;
+    if (!name) return res.status(400).json({ error: 'name query param required' });
+    const contents = await ToolManager.getResourceContents(name as string, subpath as string | undefined);
+    res.json({ path: subpath || '/', entries: contents });
   });
 
   // --- Static Files & Vite Middleware ---

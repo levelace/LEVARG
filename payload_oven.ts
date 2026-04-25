@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { OllamaClient } from './ollama_client.js';
 
 export interface PayloadTier {
   standard: string[];
@@ -221,15 +221,13 @@ export class PayloadOven {
       });
     }
     return payloads;
-    
-    return payloads;
   }
 
   static getAllCategories(): string[] {
     return Object.keys(this.oven);
   }
 
-  static async generateCustomPayload(ai: GoogleGenAI | null, category: string, context: string): Promise<string> {
+  static async generateCustomPayload(ai: OllamaClient | null, category: string, context: string): Promise<string> {
     if (!ai) return this.getPayloads(category, 1, 1)[0];
 
     const prompt = `As an elite security researcher (argila) and red-team strategist, generate a highly specialized, stealthy ${category} payload for the following context:
@@ -241,11 +239,7 @@ export class PayloadOven {
     Return ONLY the raw payload string, no explanation.`;
 
     try {
-      const res = await ai.models.generateContent({
-        model: 'gemini-1.5-pro',
-        contents: prompt
-      });
-      const rawPayload = res.text?.trim() || this.getPayloads(category, 1, 1)[0];
+      const rawPayload = (await ai.generate(prompt))?.trim() || this.getPayloads(category, 1, 1)[0];
 
       // Randomly apply an extra layer of mutation to AI generated payloads for maximum evasion
       const mutationTypes: ('url' | 'double-url' | 'html' | 'hex' | 'unicode')[] = ['url', 'double-url', 'html', 'hex', 'unicode'];

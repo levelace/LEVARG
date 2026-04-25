@@ -21,6 +21,25 @@ rm -rf node_modules package-lock.json
 npm install
 ```
 
+## AI Analysis (Ollama — free, local, no API key)
+
+AI-powered features (payload generation, response analysis, autonomous hunting) run through [Ollama](https://ollama.com), a local LLM runner — **no API keys or cloud accounts needed**.
+
+```bash
+# 1. Install Ollama (one-time)
+curl -fsSL https://ollama.com/install.sh | sh   # Linux / macOS
+# Windows: download from https://ollama.com/download
+
+# 2. Pull a model (one-time)
+ollama pull llama3.2       # fast, ~2 GB — good default
+# ollama pull mistral      # alternative: better quality, ~4 GB
+
+# 3. Make sure Ollama is running before starting LevarG
+ollama serve               # starts on http://localhost:11434
+```
+
+You can override the model or URL in a `.env` file (see `.env.example`).
+
 ## Run
 
 ```bash
