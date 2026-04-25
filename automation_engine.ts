@@ -138,7 +138,7 @@ export class AutomationEngine {
           Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
           const analysisRes = await ai.models.generateContent({
-            model: 'gemini-1.5-pro',
+            model: 'gemini-2.0-flash',
             contents: analysisPrompt,
             config: { responseMimeType: 'application/json' } as any
           });
@@ -205,7 +205,7 @@ export class AutomationEngine {
             Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "discovered_user": string | null, "chain_potential": string | null }`;
 
             const analysisRes = await ai.models.generateContent({
-              model: 'gemini-1.5-pro',
+              model: 'gemini-2.0-flash',
               contents: analysisPrompt,
               config: { responseMimeType: 'application/json' } as any
             });
@@ -259,7 +259,7 @@ export class AutomationEngine {
             Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
             const analysisRes = await ai.models.generateContent({
-              model: 'gemini-1.5-pro',
+              model: 'gemini-2.0-flash',
               contents: analysisPrompt,
               config: { responseMimeType: 'application/json' } as any
             });
@@ -452,7 +452,7 @@ export class AutomationEngine {
                       Return JSON: { "found": boolean, "secrets": string[], "explanation": string }`;
                       
                       const secretRes = await ai.models.generateContent({
-                        model: 'gemini-1.5-pro',
+                        model: 'gemini-2.0-flash',
                         contents: secretPrompt,
                         config: { responseMimeType: 'application/json' } as any
                       });
@@ -564,7 +564,7 @@ export class AutomationEngine {
 
           try {
             const rankingRes = await ai.models.generateContent({
-              model: 'gemini-1.5-pro',
+              model: 'gemini-2.0-flash',
               contents: rankingPrompt,
               config: { responseMimeType: 'application/json' } as any
             });
@@ -627,7 +627,7 @@ export class AutomationEngine {
               Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
               const analysisRes = await ai.models.generateContent({
-                model: 'gemini-1.5-pro',
+                model: 'gemini-2.0-flash',
                 contents: analysisPrompt,
                 config: { responseMimeType: 'application/json' } as any
               });
@@ -730,7 +730,7 @@ export class AutomationEngine {
                     Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
                     const analysisRes = await ai.models.generateContent({
-                      model: 'gemini-1.5-pro',
+                      model: 'gemini-2.0-flash',
                       contents: analysisPrompt,
                       config: { responseMimeType: 'application/json' } as any
                     });
@@ -800,7 +800,7 @@ export class AutomationEngine {
                 Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
                 const analysisRes = await ai.models.generateContent({
-                  model: 'gemini-1.5-pro',
+                  model: 'gemini-2.0-flash',
                   contents: analysisPrompt,
                   config: { responseMimeType: 'application/json' } as any
                 });
@@ -834,7 +834,7 @@ export class AutomationEngine {
           
           try {
             const pocRes = await ai.models.generateContent({
-              model: 'gemini-1.5-pro',
+              model: 'gemini-2.0-flash',
               contents: pocPrompt,
               config: { responseMimeType: 'application/json' } as any
             });

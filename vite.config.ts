@@ -18,9 +18,6 @@ export default defineConfig(({mode}) => {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       ...(process.env.DISABLE_HMR === 'true' ? { hmr: false } : {}),
     },
-    define: {
-      'process.env.GEMINI_API_KEY': JSON.stringify(process.env.GEMINI_API_KEY || ''),
-      'process.env.API_KEY': JSON.stringify(process.env.API_KEY || '')
-    }
+    define: {}
   };
 });

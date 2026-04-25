@@ -221,8 +221,6 @@ export class PayloadOven {
       });
     }
     return payloads;
-    
-    return payloads;
   }
 
   static getAllCategories(): string[] {
@@ -242,7 +240,7 @@ export class PayloadOven {
 
     try {
       const res = await ai.models.generateContent({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-2.0-flash',
         contents: prompt
       });
       const rawPayload = res.text?.trim() || this.getPayloads(category, 1, 1)[0];

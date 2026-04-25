@@ -1,4 +1,5 @@
 
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import cors from 'cors';
@@ -10,6 +11,7 @@ import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 import { AutomationEngine } from './automation_engine.js';
 
 import { ToolManager } from './tool_manager.js';
+import { GoogleGenAI } from '@google/genai';
 
 async function startServer() {
   const app = express();
@@ -395,6 +397,48 @@ async function startServer() {
   app.get('/api/automation/jobs/:id/logs', (req, res) => {
     const logs = db.prepare('SELECT * FROM automation_logs WHERE job_id = ? ORDER BY created_at ASC').all(req.params.id);
     res.json(logs.map((l: any) => ({ ...l, data: l.data ? JSON.parse(l.data) : null })));
+  });
+
+  // --- AI Proxy Endpoints ---
+  app.post('/api/ai/generate-payloads', async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'GEMINI_API_KEY not configured on server.' });
+    const { name, type } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required' });
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `Generate a list of 20 highly effective security testing payloads for the following scenario: ${name}.\nThe payload type is: ${type || 'fuzzing'}.\nReturn ONLY the payloads, one per line. Do not include markdown formatting, numbers, or explanations.`;
+      const result = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      });
+      const responseText = result.text ?? '';
+      res.json({ content: responseText.trim() });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'AI generation failed' });
+    }
+  });
+
+  app.post('/api/ai/analyze-response', async (req, res) => {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'GEMINI_API_KEY not configured on server.' });
+    const { status, headers, body } = req.body;
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `Analyze this HTTP response for potential security vulnerabilities.\nFocus on:\n1. Missing security headers\n2. Information disclosure\n3. Reflected input or XSS vectors\n4. Server errors indicating SQLi/RCE\nReturn a concise, bulleted technical summary formatted in Markdown.\n\nStatus: ${status}\nHeaders: ${JSON.stringify(headers)}\nBody: ${typeof body === 'string' ? body.substring(0, 5000) : JSON.stringify(body).substring(0, 5000)}`;
+      const result = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: prompt,
+      });
+      const text = result.text ?? '';
+      if (text) {
+        res.json({ analysis: text });
+      } else {
+        res.status(500).json({ error: 'Failed to generate analysis.' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || 'AI analysis failed' });
+    }
   });
 
   // Tools Status
