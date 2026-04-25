@@ -415,13 +415,18 @@ async function startServer() {
 
   app.post('/api/ai/analyze-response', async (req, res) => {
     const { status, headers, body } = req.body;
-    const ollama = new OllamaClient();
-    const prompt = `Analyze this HTTP response for potential security vulnerabilities.\nFocus on:\n1. Missing security headers\n2. Information disclosure\n3. Reflected input or XSS vectors\n4. Server errors indicating SQLi/RCE\nReturn a concise, bulleted technical summary formatted in Markdown.\n\nStatus: ${status}\nHeaders: ${JSON.stringify(headers)}\nBody: ${typeof body === 'string' ? body.substring(0, 5000) : JSON.stringify(body).substring(0, 5000)}`;
-    const analysis = await ollama.generate(prompt);
-    if (analysis) {
-      res.json({ analysis });
-    } else {
-      res.status(500).json({ error: 'Ollama is not reachable. Make sure Ollama is running (ollama serve).' });
+    try {
+      const ollama = new OllamaClient();
+      const bodyStr = typeof body === 'string' ? body.substring(0, 5000) : JSON.stringify(body ?? '').substring(0, 5000);
+      const prompt = `Analyze this HTTP response for potential security vulnerabilities.\nFocus on:\n1. Missing security headers\n2. Information disclosure\n3. Reflected input or XSS vectors\n4. Server errors indicating SQLi/RCE\nReturn a concise, bulleted technical summary formatted in Markdown.\n\nStatus: ${status}\nHeaders: ${JSON.stringify(headers)}\nBody: ${bodyStr}`;
+      const analysis = await ollama.generate(prompt);
+      if (analysis) {
+        res.json({ analysis });
+      } else {
+        res.status(500).json({ error: 'Ollama is not reachable. Make sure Ollama is running (ollama serve).' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
