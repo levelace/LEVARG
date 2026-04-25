@@ -425,7 +425,7 @@ async function startServer() {
     }
   });
 
-  // Tools Status
+  // --- Tools & Resources API ---
   app.get('/api/tools/status', async (req, res) => {
     try {
       const statuses = await ToolManager.getAllStatus();
@@ -433,6 +433,42 @@ async function startServer() {
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  app.post('/api/tools/install', async (req, res) => {
+    const { toolName, methodIndex } = req.body;
+    if (!toolName || methodIndex === undefined) return res.status(400).json({ error: 'toolName and methodIndex required' });
+    const result = await ToolManager.installTool(toolName, methodIndex);
+    ToolManager.clearCache();
+    res.json(result);
+  });
+
+  app.post('/api/tools/pdtm-install-all', async (_req, res) => {
+    const result = await ToolManager.pdtmInstallAll();
+    res.json(result);
+  });
+
+  app.get('/api/resources/status', async (_req, res) => {
+    try {
+      const statuses = await ToolManager.getResourceStatus();
+      res.json(statuses);
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/resources/install', async (req, res) => {
+    const { resourceName, methodIndex } = req.body;
+    if (!resourceName || methodIndex === undefined) return res.status(400).json({ error: 'resourceName and methodIndex required' });
+    const result = await ToolManager.installResource(resourceName, methodIndex);
+    res.json(result);
+  });
+
+  app.get('/api/resources/browse', async (req, res) => {
+    const { name, subpath } = req.query;
+    if (!name) return res.status(400).json({ error: 'name query param required' });
+    const contents = await ToolManager.getResourceContents(name as string, subpath as string | undefined);
+    res.json({ path: subpath || '/', entries: contents });
   });
 
   // --- Static Files & Vite Middleware ---
