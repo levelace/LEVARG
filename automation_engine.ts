@@ -6,7 +6,7 @@ import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 import * as cheerio from 'cheerio';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { GoogleGenAI, HarmCategory, HarmBlockThreshold } from '@google/genai';
+import { OllamaClient } from './ollama_client.js';
 import { PayloadOven } from './payload_oven.js';
 import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
@@ -97,7 +97,7 @@ export class AutomationEngine {
     return scored.sort((a, b) => b.score - a.score).slice(0, limit);
   }
 
-  private static async auditAuthenticationFlow(jobId: string, asset: string, tech: string[], ai: GoogleGenAI | null) {
+  private static async auditAuthenticationFlow(jobId: string, asset: string, tech: string[], ai: OllamaClient | null) {
     const hostname = new URL(asset).hostname;
     const memory = MemoryManager.getMemory(jobId, hostname);
     
@@ -137,14 +137,10 @@ export class AutomationEngine {
           Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
           Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-          const analysisRes = await ai.models.generateContent({
-            model: 'gemini-2.0-flash',
-            contents: analysisPrompt,
-            config: { responseMimeType: 'application/json' } as any
-          });
+          const analysisText = await ai.generate(analysisPrompt, true);
 
-          if (analysisRes.text) {
-            const analysis = JSON.parse(analysisRes.text);
+          if (analysisText) {
+            const analysis = JSON.parse(analysisText);
             this.log(jobId, 'info', `Auth Flow Analysis for ${asset}: ${analysis.isVulnerable ? 'VULNERABLE' : 'NOT VULNERABLE'} (${analysis.confidence})`, { explanation: analysis.explanation });
             if (analysis.isVulnerable && analysis.confidence > 0.8) {
               this.log(jobId, 'vuln', `CONFIRMED AUTH CSRF: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
@@ -204,14 +200,10 @@ export class AutomationEngine {
             Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
             Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "discovered_user": string | null, "chain_potential": string | null }`;
 
-            const analysisRes = await ai.models.generateContent({
-              model: 'gemini-2.0-flash',
-              contents: analysisPrompt,
-              config: { responseMimeType: 'application/json' } as any
-            });
+            const analysisText = await ai.generate(analysisPrompt, true);
 
-            if (analysisRes.text) {
-              const analysis = JSON.parse(analysisRes.text);
+            if (analysisText) {
+              const analysis = JSON.parse(analysisText);
               if (analysis.isVulnerable && analysis.confidence > 0.8) {
                 this.log(jobId, 'vuln', `CONFIRMED USER ENUMERATION: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                 MemoryManager.addFinding(jobId, hostname, { type: 'User Enumeration', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
@@ -224,7 +216,7 @@ export class AutomationEngine {
     }
   }
 
-  private static async auditBusinessLogic(jobId: string, asset: string, tech: string[], ai: GoogleGenAI | null) {
+  private static async auditBusinessLogic(jobId: string, asset: string, tech: string[], ai: OllamaClient | null) {
     const hostname = new URL(asset).hostname;
     const memory = MemoryManager.getMemory(jobId, hostname);
     
@@ -258,14 +250,10 @@ export class AutomationEngine {
             Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
             Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-            const analysisRes = await ai.models.generateContent({
-              model: 'gemini-2.0-flash',
-              contents: analysisPrompt,
-              config: { responseMimeType: 'application/json' } as any
-            });
+            const analysisText = await ai.generate(analysisPrompt, true);
 
-            if (analysisRes.text) {
-              const analysis = JSON.parse(analysisRes.text);
+            if (analysisText) {
+              const analysis = JSON.parse(analysisText);
               if (analysis.isVulnerable && analysis.confidence > 0.8) {
                 this.log(jobId, 'vuln', `CONFIRMED BUSINESS LOGIC FLAW: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                 MemoryManager.addFinding(jobId, hostname, { type: 'Business Logic Flaw', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
@@ -283,8 +271,8 @@ export class AutomationEngine {
     }
     this.activeJobs++;
     const jobId = uuidv4();
-    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
-    const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
+    const ollamaAvailable = await OllamaClient.isAvailable();
+    const ai = ollamaAvailable ? new OllamaClient() : null;
     
     // Check Scope
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
@@ -451,14 +439,10 @@ export class AutomationEngine {
                       
                       Return JSON: { "found": boolean, "secrets": string[], "explanation": string }`;
                       
-                      const secretRes = await ai.models.generateContent({
-                        model: 'gemini-2.0-flash',
-                        contents: secretPrompt,
-                        config: { responseMimeType: 'application/json' } as any
-                      });
+                      const secretText = await ai.generate(secretPrompt, true);
                       
-                      if (secretRes.text) {
-                        const analysis = JSON.parse(secretRes.text);
+                      if (secretText) {
+                        const analysis = JSON.parse(secretText);
                         if (analysis.found) {
                           this.log(jobId, 'vuln', `SECRET DISCOVERED IN JS: ${scriptUrl}`, { secrets: analysis.secrets, explanation: analysis.explanation });
                           MemoryManager.addFinding(jobId, hostname, { type: 'Hardcoded Secret', asset: scriptUrl, gap: 'Sensitive data in client-side JS', details: analysis.explanation });
@@ -563,13 +547,9 @@ export class AutomationEngine {
           Return JSON: { "ranked_endpoints": [ { "url": string, "method": string, "reason": string, "priority": number } ] }`;
 
           try {
-            const rankingRes = await ai.models.generateContent({
-              model: 'gemini-2.0-flash',
-              contents: rankingPrompt,
-              config: { responseMimeType: 'application/json' } as any
-            });
-            if (rankingRes.text) {
-              const ranked = JSON.parse(rankingRes.text).ranked_endpoints;
+            const rankingText = await ai.generate(rankingPrompt, true);
+            if (rankingText) {
+              const ranked = JSON.parse(rankingText).ranked_endpoints;
               rankedEndpoints = ranked;
               this.log(jobId, 'info', `AI ranked ${ranked.length} endpoints for prioritized testing.`);
               allFindings.push({ phase: 'Phase 3.5', type: 'AI Prioritization', data: ranked });
@@ -626,14 +606,10 @@ export class AutomationEngine {
               
               Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-              const analysisRes = await ai.models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: analysisPrompt,
-                config: { responseMimeType: 'application/json' } as any
-              });
+              const analysisText = await ai.generate(analysisPrompt, true);
 
-              if (analysisRes.text) {
-                const analysis = JSON.parse(analysisRes.text);
+              if (analysisText) {
+                const analysis = JSON.parse(analysisText);
                 if (analysis.isVulnerable && analysis.confidence > 0.8) {
                   this.log(jobId, 'vuln', `CONFIRMED Sensitive File Disclosure: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                   MemoryManager.addFinding(jobId, hostname, { type: 'Sensitive File Disclosure', endpoint: sf.url, gap: analysis.gap_identified, chain_potential: analysis.chain_potential });
@@ -729,14 +705,10 @@ export class AutomationEngine {
                     Determine if changing the ID in the URL allowed access to another user's or object's data.
                     Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-                    const analysisRes = await ai.models.generateContent({
-                      model: 'gemini-2.0-flash',
-                      contents: analysisPrompt,
-                      config: { responseMimeType: 'application/json' } as any
-                    });
+                    const analysisText = await ai.generate(analysisPrompt, true);
 
-                    if (analysisRes.text) {
-                      const analysis = JSON.parse(analysisRes.text);
+                    if (analysisText) {
+                      const analysis = JSON.parse(analysisText);
                       if (analysis.isVulnerable && analysis.confidence > 0.8) {
                         this.log(jobId, 'vuln', `CONFIRMED IDOR: ${analysis.gap_identified}`, { explanation: analysis.explanation });
                         vulnerabilities.push({ endpoint: ep.url, type: 'IDOR', gap: analysis.gap_identified, evidence: analysis.explanation });
@@ -799,14 +771,10 @@ export class AutomationEngine {
                 
                 Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-                const analysisRes = await ai.models.generateContent({
-                  model: 'gemini-2.0-flash',
-                  contents: analysisPrompt,
-                  config: { responseMimeType: 'application/json' } as any
-                });
+                const analysisText = await ai.generate(analysisPrompt, true);
                 
-                if (analysisRes.text) {
-                  const analysis = JSON.parse(analysisRes.text);
+                if (analysisText) {
+                  const analysis = JSON.parse(analysisText);
                   if (analysis.isVulnerable && analysis.confidence > 0.8) {
                     this.log(jobId, 'vuln', `CONFIRMED ${type}: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
                     const finding = { 
@@ -833,13 +801,9 @@ export class AutomationEngine {
           Format: JSON { "pocs": [ { "title": string, "steps": string[], "impact": string, "remediation": string, "severity": string } ] }`;
           
           try {
-            const pocRes = await ai.models.generateContent({
-              model: 'gemini-2.0-flash',
-              contents: pocPrompt,
-              config: { responseMimeType: 'application/json' } as any
-            });
-            if (pocRes.text) {
-              const pocData = JSON.parse(pocRes.text);
+            const pocText = await ai.generate(pocPrompt, true);
+            if (pocText) {
+              const pocData = JSON.parse(pocText);
               allFindings.push({ phase: 'Phase 4', type: 'AI PoC Reports', data: pocData.pocs });
             }
           } catch (e) {}
