@@ -1797,6 +1797,7 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 const wasBlocked = [403, 406, 501].includes(mutRes.status);
                 MemoryManager.addFinding(jobId, hostname, {
                   type: 'WAF Detection', subtype: 'AI Mutation Payload',
+                  endpoint: asset,
                   gap: `${mutation.name}: ${mutation.explanation}`,
                   chain_potential: mutation.expected_impact,
                   payload: mutation.value, target_waf: mutation.target_waf,
@@ -1958,7 +1959,7 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
               // to avoid false positives from CSRF tokens, timestamps, nonces
               const statusDiffers = enumRes1.status !== enumRes2.status;
               const sizeDiffers = Math.abs(body1.length - body2.length) > 200;
-              if (statusDiffers || (sizeDiffers && Math.abs(body1.length - body2.length) > body1.length * 0.15)) {
+              if (statusDiffers && sizeDiffers) {
                 this.log(jobId, 'vuln', `USER ENUMERATION via password reset: ${ep.url}`);
                 MemoryManager.addFinding(jobId, hostname, {
                   type: 'Auth Vulnerability', subtype: 'User enumeration via reset',
