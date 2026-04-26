@@ -1700,7 +1700,7 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
                   // (not just a different error page)
                   const bypassBody = typeof bypassRes.data === 'string' ? bypassRes.data : JSON.stringify(bypassRes.data);
                   const statusMatchesClean = bypassRes.status === cleanStatus;
-                  const sizeMatchesClean = Math.abs(bypassBody.length - cleanBodyLen) < cleanBodyLen * 0.5;
+                  const sizeMatchesClean = cleanBodyLen === 0 ? bypassBody.length === 0 : Math.abs(bypassBody.length - cleanBodyLen) < cleanBodyLen * 0.5;
                   const notBlocked = !bp.blocked_status.includes(bypassRes.status) && bypassRes.status !== 400;
 
                   if (notBlocked && (statusMatchesClean || sizeMatchesClean)) {
@@ -1860,13 +1860,15 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
               { name: 'Subdomain takeover redirect', param: 'redirect_uri', value: `https://${oauthCanary}.${hostname}/callback`, canary: oauthCanary },
               { name: 'Path traversal redirect', param: 'redirect_uri', value: `https://${hostname}/../${oauthCanary}`, canary: oauthCanary },
               { name: 'Fragment injection', param: 'redirect_uri', value: `https://${hostname}/callback#${oauthCanary}`, canary: oauthCanary },
-              { name: 'Parameter pollution', param: 'redirect_uri', value: `https://${hostname}/callback&redirect_uri=https://${oauthCanary}.com`, canary: oauthCanary },
+              { name: 'Parameter pollution', param: 'redirect_uri', value: '', canary: oauthCanary, raw: `redirect_uri=${encodeURIComponent(`https://${hostname}/callback`)}&redirect_uri=${encodeURIComponent(`https://${oauthCanary}.com`)}` },
             ];
 
             for (const test of redirectTests) {
               try {
                 const sep = ep.url.includes('?') ? '&' : '?';
-                const testUrl = `${ep.url}${sep}${test.param}=${encodeURIComponent(test.value)}`;
+                const testUrl = test.raw
+                  ? `${ep.url}${sep}${test.raw}`
+                  : `${ep.url}${sep}${test.param}=${encodeURIComponent(test.value)}`;
                 const res = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
 
                 const location = String(res.headers['location'] || '');
