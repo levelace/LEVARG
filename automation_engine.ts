@@ -1548,6 +1548,559 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
         }
         this.log(jobId, 'info', `Phase 4d complete: ${phase4dFindings.length} 0day finding(s) added to report`);
 
+        // --- PHASE 4e: USER AND ENTITY BEHAVIOR ANALYTICS (UEBA) ---
+        this.log(jobId, 'info', 'Phase 4e: User & Entity Behavior Analytics (UEBA)');
+        this.updateJob(jobId, 'running', 'Phase 4e: UEBA');
+
+        // 4e-1: Build behavioral baselines from observed traffic patterns
+        this.log(jobId, 'info', 'Phase 4e-1: Building behavioral baselines');
+        const uebaEndpoints = prioritizedEndpoints.slice(0, 20);
+        const behaviorBaselines = new Map<string, {
+          avgLatency: number; avgSize: number; statusCode: number;
+          headerFingerprint: string; cookieNames: string[];
+          contentType: string; serverHeader: string;
+        }>();
+
+        for (const ep of uebaEndpoints) {
+          try {
+            const samples: { latency: number; size: number; status: number }[] = [];
+            let headerFp = '';
+            let cookies: string[] = [];
+            let contentType = '';
+            let serverHeader = '';
+
+            // Take 3 baseline samples per endpoint for statistical reliability
+            for (let i = 0; i < 3; i++) {
+              const start = Date.now();
+              const res = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true });
+              const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+              samples.push({ latency: Date.now() - start, size: bodyStr.length, status: res.status });
+
+              if (i === 0) {
+                headerFp = Object.keys(res.headers).sort().join(',');
+                cookies = (res.headers['set-cookie'] || []).map((c: string) => c.split('=')[0]);
+                contentType = String(res.headers['content-type'] || '').split(';')[0];
+                serverHeader = String(res.headers['server'] || '');
+              }
+              if (i < 2) await delay(200);
+            }
+
+            const avgLatency = samples.reduce((s, x) => s + x.latency, 0) / samples.length;
+            const avgSize = samples.reduce((s, x) => s + x.size, 0) / samples.length;
+
+            behaviorBaselines.set(ep.url, {
+              avgLatency, avgSize, statusCode: samples[0].status,
+              headerFingerprint: headerFp, cookieNames: cookies,
+              contentType, serverHeader,
+            });
+          } catch {}
+        }
+        this.log(jobId, 'info', `Phase 4e-1 complete: ${behaviorBaselines.size} endpoint baselines established`);
+
+        // 4e-2: Detect low-and-slow behavioral anomalies
+        this.log(jobId, 'info', 'Phase 4e-2: Low-and-slow attack pattern detection');
+        let uebaCount = 0;
+        const lowSlowProbes: { name: string; method: string; transform: (url: string) => { url: string; headers?: Record<string, string>; data?: string } }[] = [
+          {
+            name: 'Credential stuffing pattern',
+            method: 'POST',
+            transform: (url) => ({
+              url, headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+              data: 'username=admin&password=test123'
+            }),
+          },
+          {
+            name: 'Session fixation probe',
+            method: 'GET',
+            transform: (url) => ({
+              url, headers: { 'Cookie': 'session=fixated_session_id_12345; JSESSIONID=attacker_controlled' },
+            }),
+          },
+          {
+            name: 'Privilege escalation via role param',
+            method: 'GET',
+            transform: (url) => {
+              const sep = url.includes('?') ? '&' : '?';
+              return { url: `${url}${sep}role=admin&is_admin=1&privilege=superuser&access_level=9` };
+            },
+          },
+          {
+            name: 'Enumeration cadence detection',
+            method: 'GET',
+            transform: (url) => {
+              const sep = url.includes('?') ? '&' : '?';
+              return { url: `${url}${sep}id=1` };
+            },
+          },
+          {
+            name: 'API abuse — rate boundary',
+            method: 'GET',
+            transform: (url) => {
+              const sep = url.includes('?') ? '&' : '?';
+              return { url: `${url}${sep}limit=999999&offset=0&page=1` };
+            },
+          },
+          {
+            name: 'Insider data exfil — bulk export',
+            method: 'GET',
+            transform: (url) => {
+              const sep = url.includes('?') ? '&' : '?';
+              return { url: `${url}${sep}export=csv&format=json&download=all&dump=true` };
+            },
+          },
+        ];
+
+        for (const ep of uebaEndpoints.slice(0, 12)) {
+          if (uebaCount >= 8) break;
+          const baseline = behaviorBaselines.get(ep.url);
+          if (!baseline) continue;
+
+          for (const probe of lowSlowProbes) {
+            try {
+              const config = probe.transform(ep.url);
+              const start = Date.now();
+              const res = probe.method === 'POST'
+                ? await axios.post(config.url, config.data || '', {
+                    timeout: 8000, validateStatus: () => true,
+                    headers: config.headers || {},
+                  })
+                : await axios.get(config.url, {
+                    timeout: 8000, validateStatus: () => true,
+                    headers: config.headers || {},
+                  });
+
+              const latency = Date.now() - start;
+              const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+              const bodyLen = bodyStr.length;
+              const responseHeaders = Object.keys(res.headers).sort().join(',');
+
+              // Behavioral deviation analysis
+              const deviations: string[] = [];
+
+              // Status code change indicating access control reaction
+              if (res.status !== baseline.statusCode) {
+                if (res.status === 200 && baseline.statusCode >= 400) {
+                  deviations.push(`Access granted: ${baseline.statusCode} → ${res.status} (potential bypass)`);
+                } else if (res.status === 302 || res.status === 301) {
+                  const location = res.headers['location'] || '';
+                  if (/login|auth|signin|sso/i.test(location)) {
+                    deviations.push(`Auth redirect detected: → ${location}`);
+                  }
+                }
+              }
+
+              // Response size anomaly — data exposure
+              if (bodyLen > baseline.avgSize * 3 && bodyLen > 1000) {
+                deviations.push(`Data volume spike: ${Math.round(baseline.avgSize)} → ${bodyLen} bytes (potential data leak)`);
+              }
+
+              // Header fingerprint change — different backend/handler
+              if (responseHeaders !== baseline.headerFingerprint) {
+                deviations.push(`Header fingerprint changed: different backend handling`);
+              }
+
+              // Latency anomaly — heavy processing
+              if (latency > baseline.avgLatency * 5 && latency > 3000) {
+                deviations.push(`Processing spike: ${Math.round(baseline.avgLatency)}ms → ${latency}ms`);
+              }
+
+              // Content type shift — different response handler
+              const resContentType = String(res.headers['content-type'] || '').split(';')[0];
+              if (resContentType && resContentType !== baseline.contentType) {
+                deviations.push(`Content-Type shift: ${baseline.contentType} → ${resContentType}`);
+              }
+
+              // Check for sensitive data in response
+              const sensitivePatterns = /password|secret|api[_-]?key|access[_-]?token|private[_-]?key|ssn|credit[_-]?card|\b\d{3}-\d{2}-\d{4}\b|bearer\s+[a-zA-Z0-9._-]{20,}/i;
+              if (sensitivePatterns.test(bodyStr)) {
+                deviations.push(`Sensitive data detected in response body`);
+              }
+
+              if (deviations.length >= 2 || (deviations.length === 1 && deviations[0].includes('bypass'))) {
+                this.log(jobId, 'vuln', `UEBA ANOMALY [${probe.name}]: ${ep.url}`, { deviations });
+
+                if (ai) {
+                  const uebaPrompt = `As an advanced threat analyst, analyze this User and Entity Behavior Analytics (UEBA) anomaly.
+
+Endpoint: ${ep.url}
+Probe: ${probe.name}
+Behavioral Deviations:
+${deviations.map(d => `- ${d}`).join('\n')}
+
+Baseline: Status ${baseline.statusCode}, Avg Size ${Math.round(baseline.avgSize)}b, Avg Latency ${Math.round(baseline.avgLatency)}ms
+Probe Response: Status ${res.status}, Size ${bodyLen}b, Latency ${latency}ms
+Response Snippet: ${bodyStr.substring(0, 1500)}
+Server: ${baseline.serverHeader}
+
+Determine if these behavioral deviations indicate:
+1. Low-and-slow attack success (credential stuffing, session hijack, privilege escalation)
+2. Insider threat indicator (unusual data access, bulk extraction)
+3. Access control weakness exploitable through behavioral manipulation
+
+Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null, "threat_type": "low_and_slow" | "insider_threat" | "access_control" | "data_exfil" }`;
+
+                  const analysis = safeJsonParse<AiVulnResult & { threat_type?: string }>(
+                    await ai.generate(uebaPrompt, true), { ...NULL_VULN, threat_type: 'unknown' }
+                  );
+
+                  if (analysis.isVulnerable && analysis.confidence > 0.7) {
+                    this.log(jobId, 'vuln', `UEBA THREAT [${analysis.threat_type}]: ${analysis.gap_identified}`, {
+                      endpoint: ep.url, probe: probe.name, deviations,
+                      threat_type: analysis.threat_type, explanation: analysis.explanation,
+                    });
+                    MemoryManager.addFinding(jobId, hostname, {
+                      type: 'UEBA Anomaly', subtype: analysis.threat_type,
+                      endpoint: ep.url, probe: probe.name, deviations,
+                      gap: analysis.gap_identified, chain_potential: analysis.chain_potential,
+                      severity: 'HIGH',
+                    });
+                    uebaCount++;
+                  }
+                } else {
+                  // Without AI, only flag the strongest signals
+                  if (deviations.some(d => d.includes('bypass') || d.includes('Sensitive data'))) {
+                    MemoryManager.addFinding(jobId, hostname, {
+                      type: 'UEBA Anomaly', subtype: 'behavioral_deviation',
+                      endpoint: ep.url, probe: probe.name, deviations,
+                      gap: deviations.join('; '), chain_potential: null, severity: 'MEDIUM',
+                    });
+                    uebaCount++;
+                  }
+                }
+              }
+            } catch {}
+          }
+        }
+
+        // 4e-3: Session behavior analysis — detect session mismanagement
+        this.log(jobId, 'info', 'Phase 4e-3: Session behavior analysis');
+        for (const ep of uebaEndpoints.slice(0, 5)) {
+          if (uebaCount >= 8) break;
+          try {
+            // Check if session tokens rotate properly
+            const res1 = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true });
+            const cookies1 = res1.headers['set-cookie'] || [];
+            await delay(500);
+            const res2 = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true });
+            const cookies2 = res2.headers['set-cookie'] || [];
+
+            const sessionIssues: string[] = [];
+
+            // Check for predictable session IDs
+            for (const c of cookies1) {
+              const val = c.split('=')[1]?.split(';')[0] || '';
+              if (/^[0-9]+$/.test(val) && val.length < 10) {
+                sessionIssues.push(`Predictable numeric session ID: ${c.split('=')[0]}=${val}`);
+              }
+              if (/^(session|sid|sess)$/i.test(c.split('=')[0]) && val.length < 16) {
+                sessionIssues.push(`Short session token (${val.length} chars): weak entropy`);
+              }
+            }
+
+            // Check for session tokens that don't change between requests (non-rotation)
+            const c1Vals = cookies1.map((c: string) => c.split(';')[0]).sort();
+            const c2Vals = cookies2.map((c: string) => c.split(';')[0]).sort();
+            if (c1Vals.length > 0 && JSON.stringify(c1Vals) === JSON.stringify(c2Vals)) {
+              // This is actually normal for session cookies — only flag if combined with other issues
+            }
+
+            if (sessionIssues.length > 0) {
+              this.log(jobId, 'vuln', `SESSION BEHAVIOR ANOMALY: ${ep.url}`, { issues: sessionIssues });
+              MemoryManager.addFinding(jobId, hostname, {
+                type: 'UEBA Anomaly', subtype: 'session_mismanagement',
+                endpoint: ep.url, gap: sessionIssues.join('; '),
+                chain_potential: 'Session hijacking, fixation, or prediction', severity: 'HIGH',
+              });
+              uebaCount++;
+            }
+          } catch {}
+        }
+
+        // Collect Phase 4e findings
+        const phase4eMemory = MemoryManager.getMemory(jobId, hostname);
+        const phase4eFindings = phase4eMemory.findings.filter((f: Record<string, unknown>) => f.type === 'UEBA Anomaly');
+        const newPhase4eFindings = phase4eFindings.slice(phase4eFindings.length - uebaCount);
+        if (newPhase4eFindings.length > 0) {
+          allFindings.push({ phase: 'Phase 4e', type: 'UEBA Analysis Results', data: newPhase4eFindings });
+          vulnerabilities.push(...newPhase4eFindings.map((f: Record<string, unknown>) => ({
+            type: f.type, endpoint: f.endpoint, gap: f.gap,
+            severity: f.severity || 'HIGH', phase: 'Phase 4e'
+          })));
+        }
+        this.log(jobId, 'info', `Phase 4e complete: ${uebaCount} UEBA anomaly(ies) detected`);
+
+        // --- PHASE 4f: NETWORK & HOST TRAFFIC ANOMALY DETECTION ---
+        this.log(jobId, 'info', 'Phase 4f: Network & Host Traffic Anomaly Detection');
+        this.updateJob(jobId, 'running', 'Phase 4f: Traffic Anomaly Detection');
+
+        // 4f-1: Protocol-level anomaly detection — deep inspection of HTTP semantics
+        this.log(jobId, 'info', 'Phase 4f-1: Protocol-level anomaly detection');
+        let trafficCount = 0;
+        const trafficTargets = prioritizedEndpoints.slice(0, 15);
+
+        for (const ep of trafficTargets) {
+          if (trafficCount >= 10) break;
+          try {
+            const parsed = new URL(ep.url);
+            const host = parsed.hostname;
+            const useTls = parsed.protocol === 'https:';
+            const port = parsed.port ? parseInt(parsed.port) : (useTls ? 443 : 80);
+            const path = parsed.pathname + parsed.search;
+
+            // Test 1: HTTP method confusion — send unusual methods
+            const unusualMethods = ['TRACE', 'CONNECT', 'OPTIONS', 'PROPFIND', 'PATCH'];
+            for (const method of unusualMethods) {
+              try {
+                const res = await axios.request({
+                  url: ep.url, method: method as any,
+                  timeout: 5000, validateStatus: () => true,
+                });
+
+                if (method === 'TRACE' && res.status === 200) {
+                  const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+                  if (/TRACE|message\/http/i.test(bodyStr + (res.headers['content-type'] || ''))) {
+                    this.log(jobId, 'vuln', `TRACE METHOD ENABLED on ${ep.url}`);
+                    MemoryManager.addFinding(jobId, hostname, {
+                      type: 'Traffic Anomaly', subtype: 'TRACE enabled',
+                      endpoint: ep.url, gap: 'TRACE method enabled — Cross-Site Tracing (XST) possible',
+                      chain_potential: 'Steal HttpOnly cookies via XST', severity: 'MEDIUM',
+                    });
+                    trafficCount++;
+                  }
+                }
+
+                if (method === 'OPTIONS' && res.status === 200) {
+                  const allow = res.headers['allow'] || res.headers['access-control-allow-methods'] || '';
+                  if (/PUT|DELETE|PATCH/i.test(allow)) {
+                    const dangerousMethods = allow.split(',').map((m: string) => m.trim()).filter((m: string) => /PUT|DELETE|PATCH/i.test(m));
+                    this.log(jobId, 'vuln', `DANGEROUS METHODS ALLOWED on ${ep.url}: ${dangerousMethods.join(', ')}`);
+                    MemoryManager.addFinding(jobId, hostname, {
+                      type: 'Traffic Anomaly', subtype: 'Dangerous methods',
+                      endpoint: ep.url, methods: dangerousMethods,
+                      gap: `Dangerous HTTP methods allowed: ${dangerousMethods.join(', ')}`,
+                      chain_potential: 'Unauthorized data modification or deletion', severity: 'MEDIUM',
+                    });
+                    trafficCount++;
+                  }
+                }
+
+                if (method === 'PROPFIND' && (res.status === 207 || res.status === 200)) {
+                  this.log(jobId, 'vuln', `WebDAV PROPFIND active on ${ep.url}`);
+                  MemoryManager.addFinding(jobId, hostname, {
+                    type: 'Traffic Anomaly', subtype: 'WebDAV active',
+                    endpoint: ep.url, gap: 'WebDAV PROPFIND enabled — directory listing and file manipulation possible',
+                    chain_potential: 'Upload webshell via PUT, list sensitive files', severity: 'HIGH',
+                  });
+                  trafficCount++;
+                }
+              } catch {}
+            }
+
+            // Test 2: TLS/SSL inspection — check for downgrade and weak ciphers
+            if (useTls) {
+              try {
+                const tlsInfo = await new Promise<{
+                  protocol: string; cipher: string; authorized: boolean;
+                  certExpiry: string; certSubject: string;
+                }>((resolve, reject) => {
+                  const socket = tls.connect({ host, port, rejectUnauthorized: false }, () => {
+                    const cipher = socket.getCipher();
+                    const cert = socket.getPeerCertificate();
+                    resolve({
+                      protocol: socket.getProtocol() || 'unknown',
+                      cipher: cipher ? `${cipher.name} (${cipher.version})` : 'unknown',
+                      authorized: socket.authorized,
+                      certExpiry: cert.valid_to || '',
+                      certSubject: cert.subject ? JSON.stringify(cert.subject) : '',
+                    });
+                    socket.end();
+                  });
+                  socket.setTimeout(5000);
+                  socket.on('error', reject);
+                  socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
+                });
+
+                const tlsIssues: string[] = [];
+
+                // Weak protocol versions
+                if (/TLSv1$|TLSv1\.0|SSLv3/i.test(tlsInfo.protocol)) {
+                  tlsIssues.push(`Weak TLS version: ${tlsInfo.protocol}`);
+                }
+
+                // Weak ciphers
+                if (/RC4|DES|MD5|NULL|EXPORT|anon/i.test(tlsInfo.cipher)) {
+                  tlsIssues.push(`Weak cipher: ${tlsInfo.cipher}`);
+                }
+
+                // Certificate expiry check
+                if (tlsInfo.certExpiry) {
+                  const expiry = new Date(tlsInfo.certExpiry);
+                  const now = new Date();
+                  const daysToExpiry = (expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+                  if (daysToExpiry < 0) {
+                    tlsIssues.push(`Certificate expired: ${tlsInfo.certExpiry}`);
+                  } else if (daysToExpiry < 30) {
+                    tlsIssues.push(`Certificate expiring soon (${Math.round(daysToExpiry)} days): ${tlsInfo.certExpiry}`);
+                  }
+                }
+
+                // Self-signed or unauthorized
+                if (!tlsInfo.authorized) {
+                  tlsIssues.push('Certificate not trusted (self-signed or invalid chain)');
+                }
+
+                if (tlsIssues.length > 0) {
+                  this.log(jobId, 'vuln', `TLS ANOMALY on ${host}:${port}`, {
+                    issues: tlsIssues, protocol: tlsInfo.protocol, cipher: tlsInfo.cipher,
+                  });
+                  MemoryManager.addFinding(jobId, hostname, {
+                    type: 'Traffic Anomaly', subtype: 'TLS weakness',
+                    endpoint: ep.url, gap: tlsIssues.join('; '),
+                    chain_potential: 'MITM attack, traffic interception, downgrade attacks',
+                    severity: tlsIssues.some(i => i.includes('expired') || i.includes('Weak TLS')) ? 'HIGH' : 'MEDIUM',
+                    details: { protocol: tlsInfo.protocol, cipher: tlsInfo.cipher },
+                  });
+                  trafficCount++;
+                }
+              } catch {}
+            }
+
+            // Test 3: HTTP/2 and protocol-level fingerprinting
+            try {
+              const res = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true });
+              const serverHeader = res.headers['server'] || '';
+              const poweredBy = res.headers['x-powered-by'] || '';
+              const via = res.headers['via'] || '';
+              const xForwarded = res.headers['x-forwarded-for'] || res.headers['x-real-ip'] || '';
+
+              const fingerprints: string[] = [];
+              if (serverHeader) fingerprints.push(`Server: ${serverHeader}`);
+              if (poweredBy) fingerprints.push(`X-Powered-By: ${poweredBy}`);
+              if (via) fingerprints.push(`Via: ${via} (proxy/CDN detected)`);
+              if (xForwarded) fingerprints.push(`X-Forwarded-For leaked: ${xForwarded}`);
+
+              // Check for information disclosure via headers
+              if (poweredBy || (serverHeader && /\d+\.\d+/.test(String(serverHeader)))) {
+                this.log(jobId, 'info', `Server fingerprint: ${fingerprints.join(', ')}`, { endpoint: ep.url });
+              }
+            } catch {}
+          } catch {}
+        }
+        this.log(jobId, 'info', `Phase 4f-1 complete: ${trafficCount} protocol anomaly(ies) detected`);
+
+        // 4f-2: Connection behavior analysis — detect infrastructure-level patterns
+        this.log(jobId, 'info', 'Phase 4f-2: Connection behavior analysis');
+        const connTargets = discoveredAssets.slice(0, 8);
+        for (const asset of connTargets) {
+          if (trafficCount >= 10) break;
+          try {
+            const parsed = new URL(asset);
+            const host = parsed.hostname;
+            const useTls = parsed.protocol === 'https:';
+            const port = parsed.port ? parseInt(parsed.port) : (useTls ? 443 : 80);
+
+            // Test connection reuse behavior — detect keep-alive misconfigurations
+            const rawProbe = `GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: keep-alive\r\n\r\nGET /nonexistent-probe-path HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\n\r\n`;
+
+            const pipelineResponse = await rawHttpRequest(host, port, useTls, rawProbe, 5000);
+
+            // Check if server processed both requests (HTTP pipelining)
+            const httpResponses = pipelineResponse.split(/(?=HTTP\/\d)/);
+            if (httpResponses.length > 2) {
+              this.log(jobId, 'vuln', `HTTP PIPELINING ACCEPTED on ${asset}`);
+              MemoryManager.addFinding(jobId, hostname, {
+                type: 'Traffic Anomaly', subtype: 'HTTP pipelining',
+                endpoint: asset, gap: 'Server processes pipelined requests — potential for request smuggling and response queue poisoning',
+                chain_potential: 'Response queue poisoning, cache deception', severity: 'MEDIUM',
+              });
+              trafficCount++;
+            }
+
+            // Test for HTTP response splitting via header injection
+            try {
+              const splitUrl = `${asset}${asset.includes('?') ? '&' : '?'}redirect=%0d%0aX-Injected:%20true`;
+              const splitRes = await axios.get(splitUrl, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
+              if (splitRes.headers['x-injected'] === 'true') {
+                this.log(jobId, 'vuln', `HTTP RESPONSE SPLITTING on ${asset}`);
+                MemoryManager.addFinding(jobId, hostname, {
+                  type: 'Traffic Anomaly', subtype: 'Response splitting',
+                  endpoint: asset, gap: 'HTTP response splitting via header injection — CRLF in redirect parameter creates injected headers',
+                  chain_potential: 'Cache poisoning, XSS via injected headers, session fixation', severity: 'CRITICAL',
+                });
+                trafficCount++;
+              }
+            } catch {}
+          } catch {}
+        }
+
+        // 4f-3: AI-driven traffic pattern synthesis
+        if (ai && trafficCount > 0) {
+          this.log(jobId, 'info', 'Phase 4f-3: AI traffic pattern analysis');
+          const trafficMemory = MemoryManager.getMemory(jobId, hostname);
+          const trafficFindings = trafficMemory.findings.filter((f: Record<string, unknown>) => f.type === 'Traffic Anomaly');
+          const recentTraffic = trafficFindings.slice(-10);
+
+          if (recentTraffic.length >= 2) {
+            const trafficPrompt = `Analyze the following network and host traffic anomalies discovered during the security assessment of ${targetUrl}.
+
+Anomalies Found:
+${JSON.stringify(recentTraffic, null, 2)}
+
+Infrastructure Context:
+- Server: ${behaviorBaselines.values().next().value?.serverHeader || 'unknown'}
+- Assets scanned: ${discoveredAssets.length}
+- Endpoints analyzed: ${endpoints.length}
+
+Your task:
+1. Identify patterns that suggest systemic infrastructure weaknesses
+2. Determine if any traffic anomalies can be combined for higher-impact attacks
+3. Assess whether the infrastructure is vulnerable to advanced persistent threat (APT) techniques
+4. Rate the overall network security posture
+
+Return JSON: {
+  "infrastructure_risk": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+  "systemic_issues": string[],
+  "attack_surfaces": [{ "name": string, "findings_used": string[], "impact": string, "feasibility": number }],
+  "apt_indicators": string[]
+}`;
+
+            const trafficAnalysis = safeJsonParse<{
+              infrastructure_risk: string; systemic_issues: string[];
+              attack_surfaces: { name: string; findings_used: string[]; impact: string; feasibility: number }[];
+              apt_indicators: string[];
+            }>(await ai.generate(trafficPrompt, true), {
+              infrastructure_risk: 'UNKNOWN', systemic_issues: [], attack_surfaces: [], apt_indicators: []
+            });
+
+            for (const surface of trafficAnalysis.attack_surfaces.filter(s => s.feasibility > 0.6)) {
+              MemoryManager.addFinding(jobId, hostname, {
+                type: 'Traffic Anomaly', subtype: 'Infrastructure attack surface',
+                gap: surface.impact, chain_potential: surface.name,
+                findings_used: surface.findings_used, severity: trafficAnalysis.infrastructure_risk,
+              });
+            }
+
+            if (trafficAnalysis.apt_indicators.length > 0) {
+              this.log(jobId, 'info', `APT indicators identified: ${trafficAnalysis.apt_indicators.join(', ')}`);
+            }
+
+            this.log(jobId, 'info', `Infrastructure risk assessment: ${trafficAnalysis.infrastructure_risk}`);
+          }
+        }
+
+        // Collect Phase 4f findings
+        const phase4fMemory = MemoryManager.getMemory(jobId, hostname);
+        const phase4fFindings = phase4fMemory.findings.filter((f: Record<string, unknown>) => f.type === 'Traffic Anomaly');
+        const newPhase4fFindings = phase4fFindings.slice(phase4fFindings.length > trafficCount ? phase4fFindings.length - trafficCount : 0);
+        if (newPhase4fFindings.length > 0) {
+          allFindings.push({ phase: 'Phase 4f', type: 'Traffic Anomaly Detection Results', data: newPhase4fFindings });
+          vulnerabilities.push(...newPhase4fFindings.map((f: Record<string, unknown>) => ({
+            type: f.type, endpoint: f.endpoint || f.asset, gap: f.gap,
+            severity: f.severity || 'MEDIUM', phase: 'Phase 4f'
+          })));
+        }
+        this.log(jobId, 'info', `Phase 4f complete: ${trafficCount} traffic anomaly(ies) added to report`);
+
         // --- PHASE 5: REPORTING (FINAL SYNTHESIS) ---
         this.updateJob(jobId, 'running', 'Phase 5: Reporting');
         this.log(jobId, 'info', 'Starting Phase 5: Final Report Synthesis');
