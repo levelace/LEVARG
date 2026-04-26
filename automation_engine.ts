@@ -1647,14 +1647,14 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
         let bypassCount = 0;
         const bypassTechniques: { name: string; transform: (payload: string) => string }[] = [
           { name: 'Case mutation', transform: (p) => p.replace(/[a-zA-Z]/g, c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()) },
-          { name: 'Double URL encoding', transform: (p) => encodeURIComponent(encodeURIComponent(p)) },
+          { name: 'Double URL encoding', transform: (p) => encodeURIComponent(p) },
           { name: 'Unicode escape', transform: (p) => p.split('').map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('') },
           { name: 'HTML entity encoding', transform: (p) => p.split('').map(c => `&#${c.charCodeAt(0)};`).join('') },
           { name: 'Hex encoding', transform: (p) => p.split('').map(c => `%${c.charCodeAt(0).toString(16)}`).join('') },
-          { name: 'Null byte insertion', transform: (p) => p.split('').join('%00') },
+          { name: 'Null byte insertion', transform: (p) => p.split('').join('\0') },
           { name: 'Comment insertion (SQL)', transform: (p) => p.replace(/\s+/g, '/**/') },
-          { name: 'Tab/newline substitution', transform: (p) => p.replace(/\s+/g, '%09') },
-          { name: 'Chunked payload', transform: (p) => { const mid = Math.floor(p.length / 2); return p.slice(0, mid) + '%0a' + p.slice(mid); } },
+          { name: 'Tab/newline substitution', transform: (p) => p.replace(/\s+/g, '\t') },
+          { name: 'Chunked payload', transform: (p) => { const mid = Math.floor(p.length / 2); return p.slice(0, mid) + '\n' + p.slice(mid); } },
           { name: 'Overlong UTF-8', transform: (p) => p.replace(/</g, '%C0%BC').replace(/>/g, '%C0%BE') },
         ];
 
