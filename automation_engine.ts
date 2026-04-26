@@ -294,7 +294,7 @@ export class AutomationEngine {
           if (header.alg === 'none' || header.alg === 'None') issues.push('Algorithm "none" — signature bypass');
           if (header.alg === 'HS256' && header.jwk) issues.push('JWK embedded in header — potential key confusion');
           if (!payload.exp) issues.push('No expiration claim — token never expires');
-          if (payload.exp && payload.exp - (payload.iat || 0) > 86400 * 30) issues.push('Token lifetime > 30 days');
+          if (payload.exp && payload.iat && payload.exp - payload.iat > 86400 * 30) issues.push('Token lifetime > 30 days');
           if (payload.admin === true || payload.role === 'admin') issues.push('Privileged claims in token — test for forgery');
 
           if (issues.length > 0) {
@@ -1044,7 +1044,7 @@ export class AutomationEngine {
 
             for (const testId of testIds) {
               try {
-                const testUrl = ep.url.replace(originalId, testId);
+                const testUrl = ep.url.replace(`/${originalId}`, `/${testId}`);
                 const res = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true });
                 
                 const baseBody = typeof baselineRes.data === 'string' ? baselineRes.data : JSON.stringify(baselineRes.data);
