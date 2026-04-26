@@ -2078,6 +2078,7 @@ Return JSON: {
                 gap: surface.impact, chain_potential: surface.name,
                 findings_used: surface.findings_used, severity: trafficAnalysis.infrastructure_risk,
               });
+              trafficCount++;
             }
 
             if (trafficAnalysis.apt_indicators.length > 0) {
