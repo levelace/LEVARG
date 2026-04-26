@@ -12,8 +12,14 @@ import { AutomationEngine } from './automation_engine.js';
 
 import { ToolManager } from './tool_manager.js';
 import { OllamaClient } from './ollama_client.js';
+import { OllamaManager } from './ollama_manager.js';
 
 async function startServer() {
+  // Auto-install, start, and pull model for Ollama (runs in background)
+  const ollamaReady = OllamaManager.bootstrap().catch(err => {
+    console.warn('[Ollama] Bootstrap error (AI features may be unavailable):', err.message);
+  });
+
   const app = express();
   const PORT = 3000;
 
@@ -491,10 +497,19 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  app.listen(PORT, '0.0.0.0', async () => {
     console.log(`LevarG Server running on http://localhost:${PORT}`);
-    // FIX: Removed hardcoded Figma startup scans — scans should only be triggered by user action
+    // Wait for Ollama bootstrap to finish (model download may take a while)
+    await ollamaReady;
   });
+
+  // Clean shutdown
+  const shutdown = () => {
+    OllamaManager.shutdown();
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 startServer().catch(err => {
