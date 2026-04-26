@@ -2075,6 +2075,7 @@ Return JSON: {
             for (const surface of trafficAnalysis.attack_surfaces.filter(s => s.feasibility > 0.6)) {
               MemoryManager.addFinding(jobId, hostname, {
                 type: 'Traffic Anomaly', subtype: 'Infrastructure attack surface',
+                endpoint: targetUrl,
                 gap: surface.impact, chain_potential: surface.name,
                 findings_used: surface.findings_used, severity: trafficAnalysis.infrastructure_risk,
               });
