@@ -1193,11 +1193,11 @@ export class AutomationEngine {
           { name: 'Format string', value: '%s%s%s%s%s%s%s%s%s%s%n%n%n%n', markers: ['segfault', 'SIGSEGV', 'core dump', 'format'] },
           { name: 'Integer overflow', value: '99999999999999999999999999999999', markers: ['overflow', 'range', 'conversion', 'NaN', 'Infinity'] },
           { name: 'Negative index', value: '-1', markers: ['index', 'range', 'bound', 'underflow'] },
-          { name: 'Prototype pollution', value: '__proto__[isAdmin]=true', markers: ['prototype', 'isAdmin', 'true'] },
+          { name: 'Prototype pollution', value: '__proto__[isAdmin]=true', markers: ['prototype', 'isAdmin', '__proto__'] },
           { name: 'Proto pollution JSON', value: '{"__proto__":{"isAdmin":true}}', markers: ['prototype', 'isAdmin'] },
           { name: 'Java deserialization', value: 'rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA', markers: ['java.io', 'ClassNotFoundException', 'ObjectInputStream', 'deserialization'] },
           { name: 'PHP object injection', value: 'O:8:"stdClass":1:{s:4:"test";s:4:"test";}', markers: ['unserialize', 'Object of class', '__wakeup'] },
-          { name: 'CRLF injection', value: 'test%0d%0aInjected-Header:%20true', markers: ['Injected-Header', 'true'] },
+          { name: 'CRLF injection', value: 'test%0d%0aInjected-Header:%20true', markers: ['Injected-Header', 'injected-header'] },
           { name: 'Unicode normalization', value: '\u{FF0E}\u{FF0E}/\u{FF0E}\u{FF0E}/etc/passwd', markers: ['root:', '/bin/'] },
           { name: 'Template expression', value: '${7*7}{{7*7}}<%= 7*7 %>${{7*7}}#{7*7}', markers: ['49'] },
           { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>', markers: ['ENTITY', 'hostname', 'xxe'] },
@@ -1510,7 +1510,17 @@ Return JSON: { "chains": [ { "name": string, "steps": string[], "findings_used":
           }
         }
 
-        this.log(jobId, 'info', `Phase 4d complete: autonomous 0day discovery finished`);
+        // Collect all Phase 4d findings into allFindings for the final report
+        const phase4dMemory = MemoryManager.getMemory(jobId, hostname);
+        const phase4dFindings = phase4dMemory.findings.filter((f: Record<string, unknown>) => f.type === '0day Candidate' || f.type === '0day Chain');
+        if (phase4dFindings.length > 0) {
+          allFindings.push({ phase: 'Phase 4d', type: '0day Discovery Results', data: phase4dFindings });
+          vulnerabilities.push(...phase4dFindings.map((f: Record<string, unknown>) => ({
+            type: f.type, endpoint: f.endpoint || f.asset, gap: f.gap,
+            severity: f.severity || 'HIGH', phase: 'Phase 4d'
+          })));
+        }
+        this.log(jobId, 'info', `Phase 4d complete: ${phase4dFindings.length} 0day finding(s) added to report`);
 
         // --- PHASE 5: REPORTING (FINAL SYNTHESIS) ---
         this.updateJob(jobId, 'running', 'Phase 5: Reporting');
