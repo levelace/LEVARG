@@ -193,9 +193,10 @@ export class SessionVault {
     if (!existing) throw new Error(`Session ${id} not found`);
 
     // Match the validation in create(): an explicit empty / whitespace-only
-    // name is a 400, not a silent overwrite. `??` alone wouldn't catch this
-    // because "" is a defined non-nullish value.
-    if (patch.name !== undefined && !patch.name.trim()) {
+    // / null name is a 400, not a silent overwrite. `??` alone wouldn't catch
+    // these because "" is a defined non-nullish value, and a JSON `null` from
+    // the client survives destructuring as a real `null`.
+    if (patch.name !== undefined && (!patch.name || !patch.name.trim())) {
       throw new Error('Session name is required');
     }
 
