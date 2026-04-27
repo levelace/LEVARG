@@ -2379,6 +2379,18 @@ Return JSON: {
             cleanBodyLen = cleanBody.length;
           } catch { continue; }
 
+          // If the asset returns a 3xx redirect on a harmless query, the WAF
+          // never inspects the request body — the edge redirects (e.g.
+          // tiktok.com → www.tiktok.com or http→https) before the payload
+          // reaches the WAF rule chain. Any "bypass" reported here is a
+          // false positive: clean baseline 301 == payload response 301
+          // because BOTH got redirected pre-WAF. Skip this asset and let
+          // the redirect target be tested separately.
+          if (cleanStatus >= 300 && cleanStatus < 400) {
+            this.log(jobId, 'info', `Skipping WAF bypass tests on ${asset}: clean baseline returned ${cleanStatus}, redirect happens before WAF inspection`);
+            continue;
+          }
+
           // First establish what gets blocked
           for (const bp of basePayloads) {
             try {
@@ -2575,7 +2587,31 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 const location = String(res.headers['location'] || '');
                 const isRedirected = res.status === 302 || res.status === 301;
 
-                if (isRedirected && location.includes(test.canary)) {
+                // A genuine open-redirect bypass means the *destination* the
+                // browser navigates to includes the canary — its hostname,
+                // path, or fragment. The canary leaking back into the query
+                // string of a same-origin redirect (e.g.
+                // Location: https://www.tiktok.com/passport/...?redirect_uri=https%3A%2F%2Fcanary)
+                // is just the server echoing input back as a query param;
+                // the browser still navigates to the original same-origin
+                // host. Without this guard every redirect_uri-aware OAuth
+                // endpoint reports CRITICAL.
+                const canaryAttacks = (() => {
+                  if (!location) return false;
+                  let parsed: URL;
+                  try {
+                    parsed = new URL(location, ep.url);
+                  } catch {
+                    return location.includes(test.canary);
+                  }
+                  return (
+                    parsed.hostname.includes(test.canary) ||
+                    parsed.pathname.includes(test.canary) ||
+                    parsed.hash.includes(test.canary)
+                  );
+                })();
+
+                if (isRedirected && canaryAttacks) {
                   this.log(jobId, 'vuln', `OAUTH REDIRECT BYPASS [${test.name}]: ${ep.url}`, {
                     redirect_to: location, test: test.name,
                   });
@@ -2698,9 +2734,26 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
 
         // 4h-3: MFA bypass detection
         this.log(jobId, 'info', 'Phase 4h-3: MFA bypass detection');
-        const mfaEndpoints = endpoints.filter((ep: { url: string }) =>
-          /mfa|2fa|two.?factor|otp|verify|challenge|totp|authenticator/i.test(ep.url)
-        );
+        // Tightened from a flat substring match against words like "verify"
+        // and "challenge", which fired on TikTok's hashtag-challenge feature
+        // (`/api/challenge/item_list/`, `/@dailychallenge0`) and any feature
+        // page whose path contained "verify". Now we either match an
+        // unambiguous MFA term as its own path segment (mfa, 2fa, otp,
+        // totp, authenticator, two-factor) OR we require a verify/challenge
+        // segment to be reached *through* an auth-context segment
+        // (/auth/verify, /passport/2fa, /sso/challenge, /account/verify, …).
+        // Public content endpoints that happen to contain "challenge" no
+        // longer trigger MFA-class probes.
+        const mfaPathRe = /(?:^|\/)(?:mfa|2fa|two[-_.]?factor|otp|totp|authenticator)(?:\/|$|\?)|\/(?:auth|login|signin|sign[-_]in|passport|account|users?|sso|email|phone)\/[^?]*?(?:verify|challenge|confirm)\b/i;
+        const mfaEndpoints = endpoints.filter((ep: { url: string }) => {
+          let path: string;
+          try {
+            path = new URL(ep.url).pathname;
+          } catch {
+            return false;
+          }
+          return mfaPathRe.test(path);
+        });
 
         for (const ep of mfaEndpoints.slice(0, 5)) {
           if (authCount >= 12) break;
