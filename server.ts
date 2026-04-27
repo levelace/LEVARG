@@ -147,26 +147,26 @@ async function startServer() {
       return res.status(403).json({ error: 'Target domain not in scope' });
     }
 
-    // Optional auth-session overlay: cookies + static headers from a saved
-    // Session, but only if the session's bound scope covers the target host.
-    let finalHeaders: Record<string, string> = { ...(headers ?? {}) };
-    if (sessionId) {
-      try {
-        const overlay = SessionVault.buildRequestOverlay(sessionId, url);
-        finalHeaders = SessionVault.mergeHeaders(headers, {
-          headers: overlay.headers,
-          cookieHeader: overlay.cookieHeader,
-          userAgent: overlay.userAgent,
-        });
-      } catch (err) {
-        if (err instanceof SessionScopeError) {
-          return res.status(err.status).json({ error: err.message });
-        }
-        throw err;
-      }
-    }
-
     try {
+      // Optional auth-session overlay: cookies + static headers from a saved
+      // Session, but only if the session's bound scope covers the target host.
+      let finalHeaders: Record<string, string> = { ...(headers ?? {}) };
+      if (sessionId) {
+        try {
+          const overlay = SessionVault.buildRequestOverlay(sessionId, url);
+          finalHeaders = SessionVault.mergeHeaders(headers, {
+            headers: overlay.headers,
+            cookieHeader: overlay.cookieHeader,
+            userAgent: overlay.userAgent,
+          });
+        } catch (err) {
+          if (err instanceof SessionScopeError) {
+            return res.status(err.status).json({ error: err.message });
+          }
+          throw err;
+        }
+      }
+
       const startTime = Date.now();
       const response = await axios({
         method,
@@ -494,9 +494,11 @@ async function startServer() {
     if (sessionId) {
       try {
         SessionVault.buildRequestOverlay(sessionId, targetUrl.replace('§FUZZ§', 'baseline_test_123'));
-      } catch (err) {
+      } catch (err: any) {
         if (err instanceof SessionScopeError) return res.status(err.status).json({ error: err.message });
-        throw err;
+        // Any other failure (e.g., DB error inside SessionVault) becomes a 500
+        // rather than an unhandled rejection that would crash Express.
+        return res.status(500).json({ error: err.message ?? 'Session lookup failed' });
       }
     }
 
