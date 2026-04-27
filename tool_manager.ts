@@ -2,10 +2,12 @@ import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
 import { existsSync, mkdirSync } from 'fs';
 import { readdir } from 'fs/promises';
+import dns from 'dns/promises';
 import path from 'path';
 import portscanner from 'portscanner';
 import axios from 'axios';
 import { StackGapAnalyzer } from './stack_gap_analyzer.js';
+import { getSubdomains, getCommonPaths } from './seclists.js';
 
 const execAsync = promisify(exec);
 
@@ -575,36 +577,88 @@ export class ToolManager {
     return { stdout: `Open ports on ${hostname}: ${open.join(', ')}`, stderr: '' };
   }
 
-  static async polyfillSubdomainDiscovery(hostname: string) {
+  /**
+   * Brute-force subdomain discovery using SecLists prefixes (top-5,000 by
+   * default, capped at `max`). Resolution is DNS-only (no HTTP probe per
+   * candidate) so 5,000 candidates clear in ~30s on a residential link
+   * instead of hours. Wildcard-DNS hosts short-circuit before any work.
+   */
+  static async polyfillSubdomainDiscovery(hostname: string, max = 500) {
+    // Wildcard sentinel: if a random subdomain resolves, the host is wildcard
+    // and brute-forcing yields garbage — skip.
     const wildcardSub = `wildcard-check-${Math.random().toString(36).substring(7)}.${hostname}`;
-    let isWildcard = false;
     try {
-      const port80 = await portscanner.checkPortStatus(80, wildcardSub).catch(() => 'closed');
-      const port443 = await portscanner.checkPortStatus(443, wildcardSub).catch(() => 'closed');
-      
-      if (port80 === 'open' || port443 === 'open') {
-        isWildcard = true;
-      } else {
-        const res = await axios.get(`http://${wildcardSub}`, { timeout: 2000, validateStatus: () => true }).catch(() => null);
-        if (res && res.status !== 404) isWildcard = true;
+      const records = await dns.resolve4(wildcardSub);
+      if (records && records.length > 0) {
+        return { stdout: '', stderr: 'Wildcard DNS detected. Skipping brute-force subdomain discovery.' };
       }
-    } catch (e) {}
-
-    if (isWildcard) {
-      return { stdout: '', stderr: 'Wildcard DNS detected. Skipping brute-force subdomain discovery.' };
+    } catch {
+      // expected: random subdomain should NXDOMAIN
     }
 
-    const common = ['dev', 'api', 'admin', 'test', 'staging', 'auth', 'git', 'db', 'v1', 'v2', 'web', 'mail', 'ftp', 'ssh', 'vpn', 'cloud', 'shop', 'blog', 'app', 'portal'];
+    const prefixes = getSubdomains(max);
+    const concurrency = 50;
     const discovered: string[] = [];
-    for (const sub of common) {
-      try {
-        const res = await axios.get(`https://${sub}.${hostname}`, { timeout: 1500, validateStatus: () => true });
-        if (res.status !== 404) {
-          discovered.push(`${sub}.${hostname}`);
+
+    for (let i = 0; i < prefixes.length; i += concurrency) {
+      const slice = prefixes.slice(i, i + concurrency);
+      const results = await Promise.all(slice.map(async (sub) => {
+        const fqdn = `${sub}.${hostname}`;
+        try {
+          const records = await dns.resolve4(fqdn);
+          return records && records.length > 0 ? fqdn : null;
+        } catch {
+          return null;
         }
-      } catch (e) {}
+      }));
+      for (const r of results) if (r) discovered.push(r);
     }
+
     return { stdout: discovered.join('\n'), stderr: '' };
+  }
+
+  /**
+   * HTTP path enumeration polyfill backed by SecLists/Discovery/Web-Content/common.txt.
+   * Returns NDJSON-style stdout (one `{url, status}` per line) so callers can
+   * parse it like a tool output. Wildcard-200 servers return the response
+   * canary in `stderr` for the caller to treat as "skip".
+   */
+  static async polyfillPathEnumeration(origin: string, max = 250) {
+    const paths = getCommonPaths(max);
+    const concurrency = 20;
+    const discovered: { url: string; status: number; bodyLen: number }[] = [];
+
+    let wildcardCanary: string | null = null;
+    try {
+      const probe = await axios.get(
+        `${origin}/__levarg_wildcard_${Math.random().toString(36).slice(2, 10)}`,
+        { timeout: 4000, validateStatus: () => true, maxRedirects: 0 }
+      );
+      if (probe.status === 200) {
+        const body = typeof probe.data === 'string' ? probe.data : JSON.stringify(probe.data ?? '');
+        wildcardCanary = body.slice(0, 256);
+      }
+    } catch { /* origin may be unreachable; skip */ }
+
+    for (let i = 0; i < paths.length; i += concurrency) {
+      const slice = paths.slice(i, i + concurrency);
+      const results = await Promise.all(slice.map(async (p) => {
+        const url = `${origin}/${p.replace(/^\//, '')}`;
+        try {
+          const res = await axios.get(url, { timeout: 4000, validateStatus: () => true, maxRedirects: 0 });
+          const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '');
+          if (res.status === 404) return null;
+          if (wildcardCanary && res.status === 200 && body.slice(0, 256) === wildcardCanary) return null;
+          return { url, status: res.status, bodyLen: body.length };
+        } catch {
+          return null;
+        }
+      }));
+      for (const r of results) if (r) discovered.push(r);
+    }
+
+    const ndjson = discovered.map(d => JSON.stringify(d)).join('\n');
+    return { stdout: ndjson, stderr: wildcardCanary ? 'Wildcard 200 detected; canary-filtered.' : '' };
   }
 
   static async polyfillWhatWeb(url: string) {
