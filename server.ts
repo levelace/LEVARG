@@ -531,7 +531,22 @@ async function startServer() {
         for (const payload of payloads) {
           const pUrl = targetUrl.replace('§FUZZ§', encodeURIComponent(payload));
           const pBody = typeof body === 'string' ? body.replace('§FUZZ§', payload) : body;
-          const pHeaders = SessionVault.applyToHeaders(sessionId, pUrl, headers);
+
+          // Per-payload session overlay must not abort the whole scan. If the
+          // session was deleted mid-scan, or §FUZZ§ produces a hostname outside
+          // the session's bound scope, fall back to anonymous for *this*
+          // payload only. Pre-`axios` `.catch` already gives every payload its
+          // own network-error budget; preserve that shape here.
+          let pHeaders: Record<string, string>;
+          try {
+            pHeaders = SessionVault.applyToHeaders(sessionId, pUrl, headers);
+          } catch (err) {
+            if (err instanceof SessionScopeError) {
+              pHeaders = { ...(headers ?? {}) };
+            } else {
+              throw err;
+            }
+          }
 
           const pRes = await axios({ method, url: pUrl, headers: pHeaders, data: pBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
 

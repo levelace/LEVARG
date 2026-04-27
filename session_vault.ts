@@ -192,6 +192,13 @@ export class SessionVault {
     const existing = this.get(id);
     if (!existing) throw new Error(`Session ${id} not found`);
 
+    // Match the validation in create(): an explicit empty / whitespace-only
+    // name is a 400, not a silent overwrite. `??` alone wouldn't catch this
+    // because "" is a defined non-nullish value.
+    if (patch.name !== undefined && !patch.name.trim()) {
+      throw new Error('Session name is required');
+    }
+
     const next: SessionRow = {
       ...existing,
       name: patch.name?.trim() ?? existing.name,
