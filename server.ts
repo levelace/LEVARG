@@ -771,29 +771,48 @@ async function startServer() {
     const scopeDomain = row.scope_domain ?? '(scope deleted)';
     const ingestUrl = `${req.protocol}://${req.get('host')}/api/extension/cookies`;
     const bookmarkletUrl = `${req.protocol}://${req.get('host')}/api/extension/bookmarklet?token=${encodeURIComponent(token)}&ingestUrl=${encodeURIComponent(ingestUrl)}`;
+    const downloadUrl = `${req.protocol}://${req.get('host')}/api/extension/download`;
+    // Every dynamic value rendered into this page is escaped because the scope
+    // domain (operator-supplied), the token (URL param), and the Host header
+    // (used to derive ingestUrl/bookmarkletUrl/downloadUrl) are all attacker-
+    // influenceable. Without escaping a domain like
+    // `example.com<img src=x onerror=...>` would execute in the operator's
+    // browser when they open the pairing page.
+    const esc = (s: string) =>
+      s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    const dom = esc(scopeDomain);
+    const tok = esc(token);
+    const ingest = esc(ingestUrl);
+    const bookmarklet = esc(bookmarkletUrl);
+    const dl = esc(downloadUrl);
     res.type('html').send(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LEVARG — pair OS browser</title>
 <style>body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#111}h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}code{background:#f3f3f3;padding:.1rem .35rem;border-radius:.25rem;word-break:break-all}.token{font-family:ui-monospace,monospace;font-size:.85rem;background:#fafafa;padding:.5rem;border:1px solid #ddd;border-radius:.4rem;word-break:break-all}.warn{color:#a40;font-size:.9rem}</style>
 </head><body>
 <h1>Pair your browser to LEVARG</h1>
-<p>Bound scope: <code>${scopeDomain}</code></p>
+<p>Bound scope: <code>${dom}</code></p>
 <p>Token (copy this into the LEVARG extension's options page):</p>
-<div class="token">${token}</div>
+<div class="token">${tok}</div>
 <h2>Option A — install the extension (desktop)</h2>
 <p>Recommended for HttpOnly cookies (auth cookies are usually HttpOnly).</p>
-<ol><li>The extension lives in the LEVARG repo at <code>extension/</code>. If you have the repo locally, point Chrome at that folder; otherwise download a tarball: <code>curl -O ${req.protocol}://${req.get('host')}/api/extension/download</code></li>
+<ol><li>The extension lives in the LEVARG repo at <code>extension/</code>. If you have the repo locally, point Chrome at that folder; otherwise download a tarball: <code>curl -O ${dl}</code></li>
 <li>Open <code>chrome://extensions</code>, enable Developer Mode, click Load Unpacked, select the <code>extension/</code> folder.</li>
-<li>Open the extension's options page, paste the token above, set ingest URL to <code>${ingestUrl}</code>, save.</li>
-<li>Log in to <code>${scopeDomain}</code> in your normal tab. Click the extension icon → “Capture cookies”.</li></ol>
+<li>Open the extension's options page, paste the token above, set ingest URL to <code>${ingest}</code>, save.</li>
+<li>Log in to <code>${dom}</code> in your normal tab. Click the extension icon → “Capture cookies”.</li></ol>
 <h2>Option B — bookmarklet (mobile or no-install)</h2>
 <p class="warn">Bookmarklets cannot read HttpOnly cookies (browser limit). Use the extension when possible.</p>
-<ol><li>Open <a href="${bookmarkletUrl}">this page</a> on the device where you'll log in, save the JSON's <code>bookmarklet</code> field as a bookmark.</li>
-<li>Log in to <code>${scopeDomain}</code> in your normal tab.</li>
+<ol><li>Open <a href="${bookmarklet}">this page</a> on the device where you'll log in, save the JSON's <code>bookmarklet</code> field as a bookmark.</li>
+<li>Log in to <code>${dom}</code> in your normal tab.</li>
 <li>Tap the bookmark on that page — LEVARG ingests whatever cookies the page can see.</li></ol>
 <h2>Option C — manual paste</h2>
 <p>Open DevTools → Application → Cookies, copy as JSON, paste into the LEVARG UI → Sessions → Import. The UI will POST to the same ingest endpoint with this token.</p>
-<p>Ingest endpoint (for tooling): <code>${ingestUrl}</code></p>
+<p>Ingest endpoint (for tooling): <code>${ingest}</code></p>
 </body></html>`);
   });
 

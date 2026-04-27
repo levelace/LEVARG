@@ -135,10 +135,13 @@ export class CredentialVault {
       throw new Error('Credential username is required');
     }
 
+    // Empty-string passwords keep the existing value: the UI's "leave blank to
+    // keep current" contract has to hold for any direct API caller too,
+    // otherwise PATCH {"password": ""} would silently wipe the stored secret.
     const next = {
       label: patch.label?.trim() ?? existing.label,
       username: patch.username ?? existing.username,
-      password: patch.password ?? existing.password,
+      password: patch.password ? patch.password : existing.password,
       notes: patch.notes !== undefined ? patch.notes : existing.notes,
     };
 
