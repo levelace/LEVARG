@@ -10,14 +10,53 @@ import { OllamaClient } from './ollama_client.js';
 import { PayloadOven } from './payload_oven.js';
 import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
+import { SessionVault, SessionScopeError } from './session_vault.js';
 import * as net from 'net';
 import * as tls from 'tls';
+import { AsyncLocalStorage } from 'async_hooks';
 
 // Configure stealth
 puppeteer.use(StealthPlugin());
 
 // Configure axios retry
 axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
+
+// --- Per-job session propagation -----------------------------------------
+// AsyncLocalStorage carries the active sessionId for the duration of one
+// startJob() invocation. The axios request interceptor below transparently
+// merges cookies + auth headers from the bound Session onto every outbound
+// call inside the engine — so once the user picks a session, *every* phase
+// (recon, fingerprinting, discovery, fuzzing, auth audit) inherits the auth
+// material without each call site needing to know about it.
+//
+// For URLs outside the session's bound scope (third-party OSINT lookups,
+// IdP probes, public registry queries) the overlay is skipped and the
+// request proceeds unauthenticated rather than failing the whole job.
+export interface JobContext { sessionId?: string }
+export const jobContext = new AsyncLocalStorage<JobContext>();
+
+axios.interceptors.request.use((config) => {
+  const ctx = jobContext.getStore();
+  if (!ctx?.sessionId || !config.url) return config;
+  try {
+    const merged = SessionVault.applyToHeaders(
+      ctx.sessionId,
+      config.url,
+      (config.headers ?? {}) as Record<string, string>,
+    );
+    // axios accepts plain object headers; cast keeps both AxiosHeaders
+    // and plain-object call sites happy.
+    (config as { headers: unknown }).headers = merged;
+  } catch (err) {
+    if (err instanceof SessionScopeError) {
+      // Out-of-scope target (e.g., DNS provider, IdP). Pass through without
+      // session material rather than aborting the whole job.
+      return config;
+    }
+    throw err;
+  }
+  return config;
+});
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -453,12 +492,13 @@ export class AutomationEngine {
     } catch {}
   }
 
-  static async startJob(targetUrl: string) {
+  static async startJob(targetUrl: string, options: { sessionId?: string } = {}): Promise<string> {
     if (this.activeJobs >= 2) {
       throw new Error('Maximum concurrent jobs (2) reached. Please wait for a job to complete.');
     }
     this.activeJobs++;
     const jobId = uuidv4();
+    const sessionId = options.sessionId;
     const ollamaAvailable = await OllamaClient.isAvailable();
     const ai = ollamaAvailable ? new OllamaClient() : null;
     
@@ -480,8 +520,16 @@ export class AutomationEngine {
       .run(jobId, targetUrl, 'running', 'Phase 1: Reconnaissance');
 
     this.log(jobId, 'info', `Initialized Professional Methodology Hunt on ${targetUrl}`);
+    if (sessionId) {
+      this.log(jobId, 'info', `Authenticated session bound to job; cookies + auth headers will permeate all phases.`);
+    }
 
-    setTimeout(async () => {
+    setTimeout(() => {
+      // Run the entire hunt under a per-job AsyncLocalStorage context so the
+      // axios interceptor can apply the session overlay to every outbound
+      // call below — including those made transitively by helper modules
+      // (StackGapAnalyzer, ToolManager, etc.) that share this axios instance.
+      void jobContext.run({ sessionId }, async () => {
       try {
         const allFindings: any[] = [];
         const urlObj = new URL(targetUrl);
@@ -2821,6 +2869,7 @@ Return JSON: {
       } finally {
         this.activeJobs--;
       }
+      });
     }, 0);
 
     return jobId;

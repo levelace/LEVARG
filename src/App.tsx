@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { 
   Shield, Search, FlaskConical, Database, GitBranch, Terminal, 
-  Activity, LayoutDashboard, Binary, Layers, History, Target
+  Activity, LayoutDashboard, Binary, Layers, History, Target,
+  Globe, KeyRound
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -20,12 +21,14 @@ import AutomationDashboard from './components/AutomationDashboard';
 import HttpHistory from './components/HttpHistory';
 import Methodology from './components/Methodology';
 import Tools from './components/Tools';
+import BrowserPanel from './components/BrowserPanel';
+import SessionsPanel from './components/SessionsPanel';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-type View = 'dashboard' | 'scope' | 'recon' | 'lab' | 'scanner' | 'flows' | 'payloads' | 'encoder' | 'stackgap' | 'automation' | 'history' | 'methodology' | 'tools';
+type View = 'dashboard' | 'scope' | 'recon' | 'lab' | 'scanner' | 'flows' | 'payloads' | 'encoder' | 'stackgap' | 'automation' | 'history' | 'methodology' | 'tools' | 'browser' | 'sessions';
 
 const CyberBackground = () => {
   return (
@@ -78,6 +81,8 @@ export default function App() {
     { id: 'tools', label: 'Arsenal', icon: Shield },
     { id: 'automation', label: 'Auto-Hunter', icon: Terminal },
     { id: 'scope', label: 'Scope Control', icon: Shield },
+    { id: 'browser', label: 'Built-in Browser', icon: Globe },
+    { id: 'sessions', label: 'Auth Sessions', icon: KeyRound },
     { id: 'recon', label: 'Recon Engine', icon: Search },
     { id: 'lab', label: 'Request Lab', icon: FlaskConical },
     { id: 'history', label: 'HTTP History', icon: History },
@@ -165,6 +170,8 @@ export default function App() {
               {activeView === 'payloads' && <PayloadManager />}
               {activeView === 'methodology' && <Methodology />}
               {activeView === 'tools' && <Tools />}
+              {activeView === 'browser' && <BrowserPanel />}
+              {activeView === 'sessions' && <SessionsPanel />}
             </div>
           </motion.div>
         </AnimatePresence>

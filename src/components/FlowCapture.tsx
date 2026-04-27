@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { GitBranch, Plus, Play, Trash2, ChevronRight, Database, X, CheckCircle2, AlertCircle } from 'lucide-react';
+import SessionSelector from './SessionSelector';
 
 export default function FlowCapture() {
   const [flows, setFlows] = useState<any[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [newFlow, setNewFlow] = useState({ name: '', steps: [{ method: 'GET', url: '', headers: '{}', body: '' }] });
   const [runResults, setRunResults] = useState<any>(null);
+  const [sessionId, setSessionId] = useState('');
 
   const fetchFlows = async () => {
     const res = await fetch('/api/flows');
@@ -46,7 +48,11 @@ export default function FlowCapture() {
 
   const handleRun = async (id: string) => {
     setRunResults(null);
-    const res = await fetch(`/api/flows/${id}/run`, { method: 'POST' });
+    const res = await fetch(`/api/flows/${id}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: sessionId || undefined }),
+    });
     const data = await res.json();
     setRunResults({ id, ...data });
   };
@@ -78,14 +84,17 @@ export default function FlowCapture() {
           </h2>
           <p className="text-xs text-emerald-500/70 font-mono mt-2 uppercase tracking-widest">Multi-step request orchestration & flow analysis</p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-6 py-2.5 text-xs font-mono uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all rounded-md relative overflow-hidden group"
-        >
-          <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.1)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />
-          <Plus className="w-4 h-4 relative z-10" />
-          <span className="relative z-10">New Flow</span>
-        </button>
+        <div className="flex items-center gap-4">
+          <SessionSelector value={sessionId} onChange={setSessionId} />
+          <button
+            onClick={() => setShowCreate(true)}
+            className="bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-6 py-2.5 text-xs font-mono uppercase tracking-widest flex items-center gap-2 hover:bg-emerald-500/20 hover:shadow-[0_0_15px_rgba(16,185,129,0.3)] transition-all rounded-md relative overflow-hidden group"
+          >
+            <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.1)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />
+            <Plus className="w-4 h-4 relative z-10" />
+            <span className="relative z-10">New Flow</span>
+          </button>
+        </div>
       </header>
 
       {showCreate && (

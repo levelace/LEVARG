@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import db from './db.js';
+import { SessionVault } from './session_vault.js';
 
 interface GapFinding {
   endpoint: string;
@@ -146,7 +147,12 @@ export class StackGapAnalyzer {
     }
   }
 
-  static async analyze(url: string, method: string = 'GET', headers: any = {}) {
+  static async analyze(
+    url: string,
+    method: string = 'GET',
+    headers: Record<string, string> = {},
+    sessionId?: string,
+  ) {
     // Scope Check
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
     const isAllowed = scopes.some(s => {
@@ -163,9 +169,10 @@ export class StackGapAnalyzer {
 
     const findings: GapFinding[] = [];
 
-    // Baseline
+    // Baseline (session-aware)
+    const baseHeaders = SessionVault.applyToHeaders(sessionId, url, headers);
     const startTime = Date.now();
-    const baselineRes = await axios({ method, url, headers, validateStatus: () => true, timeout: 5000 }).catch(() => null);
+    const baselineRes = await axios({ method, url, headers: baseHeaders, validateStatus: () => true, timeout: 5000 }).catch(() => null);
     const baselineLatency = Date.now() - startTime;
     
     if (!baselineRes) return findings;
@@ -229,11 +236,15 @@ export class StackGapAnalyzer {
 
     for (const mutation of mutations) {
       try {
+        // Apply the session overlay per-mutation: cookies / static auth
+        // headers come in via session, but mutation-supplied headers (e.g.
+        // X-Forwarded-For, Transfer-Encoding) take precedence.
+        const mHeaders = SessionVault.applyToHeaders(sessionId, mutation.url, mutation.headers);
         const mStartTime = Date.now();
         const mRes = await axios({
           method: mutation.method || method,
           url: mutation.url,
-          headers: mutation.headers,
+          headers: mHeaders,
           validateStatus: () => true,
           timeout: 5000
         });
