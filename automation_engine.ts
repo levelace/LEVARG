@@ -347,7 +347,16 @@ export class AutomationEngine {
         const isStatusDiff = res1.status !== res2.status;
         const body1 = typeof res1.data === 'string' ? res1.data : JSON.stringify(res1.data);
         const body2 = typeof res2.data === 'string' ? res2.data : JSON.stringify(res2.data);
-        const isBodyDiff = body1 !== body2;
+        // Strict body equality is too loose: nearly every response differs by a
+        // CSRF token / request id / timestamp. Require either a meaningful size
+        // delta or a divergence in user-existence error markers, plus we still
+        // count any HTTP status difference and an x-response-time timing oracle.
+        const sizeDiff = Math.abs(body1.length - body2.length);
+        const enumMarkerRe = /(?:user|account|email|username)[^.\n]{0,40}(?:not\s*found|does\s*not\s*exist|already\s*(?:exists|registered|in[-\s]?use|taken)|invalid|unknown|no\s*such)\b|\bno\s*such\s+(?:user|account|email|username)\b|\b(?:invalid|unknown)\s+(?:user|account|email|username)\b/i;
+        const m1 = enumMarkerRe.test(body1);
+        const m2 = enumMarkerRe.test(body2);
+        const markerDiffers = m1 !== m2;
+        const isBodyDiff = sizeDiff > 200 || markerDiffers;
         const isTimingDiff = Math.abs((res1.headers['x-response-time'] ? parseInt(res1.headers['x-response-time'] as string) : 0) - (res2.headers['x-response-time'] ? parseInt(res2.headers['x-response-time'] as string) : 0)) > 200;
 
         if ((isStatusDiff || isBodyDiff || isTimingDiff) && ai) {
@@ -692,8 +701,12 @@ export class AutomationEngine {
 
         for (const asset of discoveredAssets.slice(0, 5)) {
           try {
-            const httpxResult = await ToolManager.execute('httpx', [asset], jobId,
-              () => ToolManager.polyfillHttpx(asset));
+            const httpxResult = await ToolManager.execute(
+              'httpx',
+              ['-u', asset, '-silent', '-json', '-no-color', '-timeout', '8', '-retries', '1', '-tech-detect', '-status-code', '-title'],
+              jobId,
+              () => ToolManager.polyfillHttpx(asset)
+            );
             if (httpxResult?.stdout) {
               const data = JSON.parse(httpxResult.stdout);
               techStacks.push({ asset, results: data });
@@ -1271,7 +1284,7 @@ export class AutomationEngine {
               // metadata field names ('uid='), the literal number 49
               // appearing anywhere in JSON, or NoSQL operators echoed
               // back from the URL ('$gt' / '$ne').
-              const errorMarkers: Record<string, string[]> = {
+              const errorMarkers: Record<string, (string | RegExp)[]> = {
                 'SQLi': ['sql syntax', 'mysql_fetch', 'postgresql', 'sqlite_', 'ora-00', 'ora-01', 'mssql', 'unclosed quotation', 'quoted string not properly terminated', 'syntax error at or near', 'sqlstate['],
                 'XSS': [customPayload, '<script>', 'onerror=', 'onload='],
                 'Path Traversal': ['root:x:0:0:', 'daemon:x:', '[fonts]', '[extensions]', '/bin/bash', '/bin/sh', '/sbin/nologin', '[boot loader]'],
@@ -2126,15 +2139,23 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
                 }
 
                 if (method === 'OPTIONS' && res.status === 200) {
-                  const allow = res.headers['allow'] || res.headers['access-control-allow-methods'] || '';
-                  if (/PUT|DELETE|PATCH/i.test(allow)) {
-                    const dangerousMethods = allow.split(',').map((m: string) => m.trim()).filter((m: string) => /PUT|DELETE|PATCH/i.test(m));
-                    this.log(jobId, 'vuln', `DANGEROUS METHODS ALLOWED on ${ep.url}: ${dangerousMethods.join(', ')}`);
+                  // Only the RFC 7231 `Allow` header advertises server-level
+                  // method support; `Access-Control-Allow-Methods` is the CORS
+                  // preflight ACK that fires on every modern API that
+                  // legitimately accepts PUT/DELETE for cross-origin SPAs and
+                  // would mass-produce false positives.
+                  const allow = String(res.headers['allow'] || '');
+                  const dangerousMethods = allow
+                    .split(',')
+                    .map((m: string) => m.trim())
+                    .filter((m: string) => /^(PUT|DELETE|PATCH)$/i.test(m));
+                  if (allow && dangerousMethods.length > 0) {
+                    this.log(jobId, 'vuln', `DANGEROUS METHODS ADVERTISED on ${ep.url}: ${dangerousMethods.join(', ')}`);
                     MemoryManager.addFinding(jobId, hostname, {
-                      type: 'Traffic Anomaly', subtype: 'Dangerous methods',
+                      type: 'Traffic Anomaly', subtype: 'Dangerous methods advertised',
                       endpoint: ep.url, methods: dangerousMethods,
-                      gap: `Dangerous HTTP methods allowed: ${dangerousMethods.join(', ')}`,
-                      chain_potential: 'Unauthorized data modification or deletion', severity: 'MEDIUM',
+                      gap: `Server advertises mutating methods (Allow: ${dangerousMethods.join(', ')}) — verify they are not reachable unauthenticated`,
+                      chain_potential: 'Potential unauthorized data modification if not properly authorized', severity: 'LOW',
                     });
                     trafficCount++;
                   }
