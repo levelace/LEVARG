@@ -13,6 +13,8 @@ import { AutomationEngine } from './automation_engine.js';
 import { ToolManager } from './tool_manager.js';
 import { OllamaClient } from './ollama_client.js';
 import { OllamaManager } from './ollama_manager.js';
+import { SessionVault, SessionScopeError, type SessionCookie, type SessionStorage } from './session_vault.js';
+import { BrowserManager } from './browser_manager.js';
 
 async function startServer() {
   // Auto-install, start, and pull model for Ollama (runs in background)
@@ -122,9 +124,15 @@ async function startServer() {
 
   // Request Laboratory
   app.post('/api/lab/proxy', async (req, res) => {
-    const { method, url, headers, body } = req.body;
+    const { method, url, headers, body, sessionId } = req.body as {
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+      body?: unknown;
+      sessionId?: string;
+    };
 
-    // Scope Check
+    // Scope Check (allowlist of domains; if empty, no restriction).
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
     const isAllowed = scopes.some(s => {
       try {
@@ -139,12 +147,31 @@ async function startServer() {
       return res.status(403).json({ error: 'Target domain not in scope' });
     }
 
+    // Optional auth-session overlay: cookies + static headers from a saved
+    // Session, but only if the session's bound scope covers the target host.
+    let finalHeaders: Record<string, string> = { ...(headers ?? {}) };
+    if (sessionId) {
+      try {
+        const overlay = SessionVault.buildRequestOverlay(sessionId, url);
+        finalHeaders = SessionVault.mergeHeaders(headers, {
+          headers: overlay.headers,
+          cookieHeader: overlay.cookieHeader,
+          userAgent: overlay.userAgent,
+        });
+      } catch (err) {
+        if (err instanceof SessionScopeError) {
+          return res.status(err.status).json({ error: err.message });
+        }
+        throw err;
+      }
+    }
+
     try {
       const startTime = Date.now();
       const response = await axios({
         method,
         url,
-        headers,
+        headers: finalHeaders,
         data: body,
         validateStatus: () => true,
         timeout: 10000
@@ -156,7 +183,7 @@ async function startServer() {
 
       // Save request/response for history/diff
       db.prepare('INSERT INTO requests (id, method, url, headers, body) VALUES (?, ?, ?, ?, ?)')
-        .run(requestId, method, url, JSON.stringify(headers), typeof body === 'string' ? body : JSON.stringify(body));
+        .run(requestId, method, url, JSON.stringify(finalHeaders), typeof body === 'string' ? body : JSON.stringify(body));
       
       db.prepare('INSERT INTO responses (id, request_id, status, headers, body) VALUES (?, ?, ?, ?, ?)')
         .run(responseId, requestId, response.status, JSON.stringify(response.headers), typeof response.data === 'string' ? response.data : JSON.stringify(response.data));
@@ -246,16 +273,57 @@ async function startServer() {
       const flow = db.prepare('SELECT * FROM flows WHERE id = ?').get(req.params.id) as any;
       if (!flow) return res.status(404).json({ error: 'Flow not found' });
       
-      const steps = JSON.parse(flow.steps);
+      const { sessionId } = (req.body ?? {}) as { sessionId?: string };
+      const steps: { method: string; url: string; headers?: Record<string, string>; body?: unknown; name?: string }[] = JSON.parse(flow.steps);
+
+      // Pre-flight: every step's URL must be in scope when scopes are configured.
+      // Failing fast prevents a multi-step flow from leaking traffic to an
+      // out-of-scope step halfway through.
+      const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
+      if (scopes.length > 0) {
+        for (const step of steps) {
+          let host: string;
+          try { host = new URL(step.url).hostname; }
+          catch { return res.status(400).json({ error: `Invalid URL in flow step: ${step.url}` }); }
+          const ok = scopes.some(s => host === s.domain || host.endsWith(`.${s.domain}`));
+          if (!ok) return res.status(403).json({ error: `Flow step out of scope: ${step.url}` });
+        }
+      }
+
       const results = [];
       
+      // Pre-flight: every session overlay must succeed before we send any
+      // step. This avoids a flow halfway-running before discovering an
+      // out-of-scope step.
+      if (sessionId) {
+        for (const step of steps) {
+          try {
+            SessionVault.buildRequestOverlay(sessionId, step.url);
+          } catch (err) {
+            if (err instanceof SessionScopeError) {
+              return res.status(err.status).json({ error: err.message });
+            }
+            throw err;
+          }
+        }
+      }
+
       for (const step of steps) {
         const startTime = Date.now();
         try {
+          let stepHeaders: Record<string, string> = { ...(step.headers ?? {}) };
+          if (sessionId) {
+            const overlay = SessionVault.buildRequestOverlay(sessionId, step.url);
+            stepHeaders = SessionVault.mergeHeaders(step.headers, {
+              headers: overlay.headers,
+              cookieHeader: overlay.cookieHeader,
+              userAgent: overlay.userAgent,
+            });
+          }
           const stepRes = await axios({
             method: step.method,
             url: step.url,
-            headers: step.headers || {},
+            headers: stepHeaders,
             data: step.body,
             validateStatus: () => true,
             timeout: 10000
@@ -283,13 +351,159 @@ async function startServer() {
     }
   });
 
+  // --- Authenticated Sessions ---
+  // A Session is a named cookie/header bundle bound to a Scope. The built-in
+  // browser populates it; Request Lab and Flow Runner consume it.
+
+  app.get('/api/sessions', (req, res) => {
+    try {
+      const scopeId = typeof req.query.scopeId === 'string' ? req.query.scopeId : undefined;
+      res.json(SessionVault.list(scopeId));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/sessions/:id', (req, res) => {
+    const session = SessionVault.get(req.params.id);
+    if (!session) return res.status(404).json({ error: 'Session not found' });
+    res.json(session);
+  });
+
+  app.post('/api/sessions', (req, res) => {
+    try {
+      const { scopeId, name, cookies, headers, storage, userAgent, notes } = req.body as {
+        scopeId: string;
+        name: string;
+        cookies?: SessionCookie[];
+        headers?: Record<string, string>;
+        storage?: SessionStorage;
+        userAgent?: string | null;
+        notes?: string | null;
+      };
+      if (!scopeId || !name) {
+        return res.status(400).json({ error: 'scopeId and name are required' });
+      }
+      const created = SessionVault.create({ scopeId, name, cookies, headers, storage, userAgent, notes });
+      res.json(created);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/sessions/:id', (req, res) => {
+    try {
+      const { name, cookies, headers, storage, userAgent, notes } = req.body as {
+        name?: string;
+        cookies?: SessionCookie[];
+        headers?: Record<string, string>;
+        storage?: SessionStorage;
+        userAgent?: string | null;
+        notes?: string | null;
+      };
+      const updated = SessionVault.update(req.params.id, { name, cookies, headers, storage, userAgent, notes });
+      res.json(updated);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/sessions/:id', (req, res) => {
+    const ok = SessionVault.delete(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Session not found' });
+    res.json({ success: true });
+  });
+
+  // --- Built-in Browser ---
+  // Drives a real Chromium under puppeteer-stealth so testers can complete
+  // SSO/MFA login flows the headless scanner can't. All captured traffic
+  // is scope-gated: requests to hosts not in the active scope are dropped,
+  // never persisted.
+
+  app.get('/api/browser/status', async (_req, res) => {
+    try {
+      res.json(await BrowserManager.status());
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/browser/launch', async (req, res) => {
+    try {
+      const { scopeId, headless } = req.body as { scopeId: string; headless?: boolean };
+      if (!scopeId) return res.status(400).json({ error: 'scopeId is required' });
+      const status = await BrowserManager.launch({ scopeId, headless });
+      res.json(status);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/browser/close', async (_req, res) => {
+    try {
+      await BrowserManager.close();
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/browser/capture', (req, res) => {
+    const { enabled } = req.body as { enabled: boolean };
+    BrowserManager.setCapturing(Boolean(enabled));
+    res.json({ success: true, capturing: Boolean(enabled) });
+  });
+
+  app.post('/api/browser/save-as-session', async (req, res) => {
+    try {
+      const { name, notes } = req.body as { name: string; notes?: string | null };
+      if (!name || !name.trim()) return res.status(400).json({ error: 'name is required' });
+      const out = await BrowserManager.saveAsSession({ name: name.trim(), notes });
+      res.json(out);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
   // Fuzzing Engine
   app.post('/api/scans', async (req, res) => {
-    const { targetUrl, payloadSetId, method, headers, body } = req.body;
+    const { targetUrl, payloadSetId, method, headers, body, sessionId } = req.body as {
+      targetUrl: string;
+      payloadSetId: string;
+      method: string;
+      headers?: Record<string, string>;
+      body?: unknown;
+      sessionId?: string;
+    };
+
+    // Pre-flight scope check on the baseline URL. Subsequent payload-fuzzed
+    // URLs share the same hostname so this gate is sufficient.
+    try {
+      const targetHost = new URL(targetUrl.replace('§FUZZ§', 'baseline_test_123')).hostname;
+      const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
+      if (scopes.length > 0) {
+        const ok = scopes.some(s => targetHost === s.domain || targetHost.endsWith(`.${s.domain}`));
+        if (!ok) return res.status(403).json({ error: 'Target domain not in scope' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'Invalid targetUrl' });
+    }
+
+    // Pre-flight session check: validate the overlay is applicable before we
+    // accept the scan. Avoids spinning up an async job that immediately fails.
+    if (sessionId) {
+      try {
+        SessionVault.buildRequestOverlay(sessionId, targetUrl.replace('§FUZZ§', 'baseline_test_123'));
+      } catch (err) {
+        if (err instanceof SessionScopeError) return res.status(err.status).json({ error: err.message });
+        throw err;
+      }
+    }
+
     const scanId = uuidv4();
-    
+
     db.prepare('INSERT INTO scans (id, target_url, payload_set_id, status) VALUES (?, ?, ?, ?)').run(scanId, targetUrl, payloadSetId, 'running');
-    
+
     res.json({ id: scanId, status: 'started' });
 
     // Run async worker
@@ -297,43 +511,45 @@ async function startServer() {
       try {
         const payloadSet = db.prepare('SELECT content FROM payloads WHERE id = ?').get(payloadSetId) as any;
         if (!payloadSet) throw new Error('Payload set not found');
-        
+
         const payloads = payloadSet.content.split('\n').filter((p: string) => p.trim());
-        
+
         // Baseline request
         const baselineUrl = targetUrl.replace('§FUZZ§', 'baseline_test_123');
         const baselineBody = typeof body === 'string' ? body.replace('§FUZZ§', 'baseline_test_123') : body;
-        
-        const baselineRes = await axios({ method, url: baselineUrl, headers, data: baselineBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
-        
+        const baselineHeaders = SessionVault.applyToHeaders(sessionId, baselineUrl, headers);
+
+        const baselineRes = await axios({ method, url: baselineUrl, headers: baselineHeaders, data: baselineBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
+
         const baselineStatus = baselineRes ? baselineRes.status : 0;
         const baselineLength = baselineRes ? JSON.stringify(baselineRes.data).length : 0;
-        
+
         db.prepare('UPDATE scans SET baseline_status = ?, baseline_length = ? WHERE id = ?').run(baselineStatus, baselineLength, scanId);
-        
+
         for (const payload of payloads) {
           const pUrl = targetUrl.replace('§FUZZ§', encodeURIComponent(payload));
           const pBody = typeof body === 'string' ? body.replace('§FUZZ§', payload) : body;
-          
-          const pRes = await axios({ method, url: pUrl, headers, data: pBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
-          
+          const pHeaders = SessionVault.applyToHeaders(sessionId, pUrl, headers);
+
+          const pRes = await axios({ method, url: pUrl, headers: pHeaders, data: pBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
+
           const pStatus = pRes ? pRes.status : 0;
           const pLength = pRes ? JSON.stringify(pRes.data).length : 0;
-          
+
           // Anomaly detection: status changed, or length differs by > 10%
           const lengthDiff = Math.abs(pLength - baselineLength);
           const isAnomaly = (pStatus !== baselineStatus && pStatus !== 0) || (baselineLength > 0 && (lengthDiff / baselineLength) > 0.1);
-          
+
           const resId = uuidv4();
           if (pRes) {
             const reqId = uuidv4();
-            db.prepare('INSERT INTO requests (id, method, url, headers, body) VALUES (?, ?, ?, ?, ?)').run(reqId, method, pUrl, JSON.stringify(headers), typeof pBody === 'string' ? pBody : JSON.stringify(pBody));
+            db.prepare('INSERT INTO requests (id, method, url, headers, body) VALUES (?, ?, ?, ?, ?)').run(reqId, method, pUrl, JSON.stringify(pHeaders), typeof pBody === 'string' ? pBody : JSON.stringify(pBody));
             db.prepare('INSERT INTO responses (id, request_id, status, headers, body) VALUES (?, ?, ?, ?, ?)').run(resId, reqId, pStatus, JSON.stringify(pRes.headers), typeof pRes.data === 'string' ? pRes.data : JSON.stringify(pRes.data));
           }
-          
+
           db.prepare('INSERT INTO scan_results (id, scan_id, payload, status, length, is_anomaly, response_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(uuidv4(), scanId, payload, pStatus, pLength, isAnomaly ? 1 : 0, pRes ? resId : null);
         }
-        
+
         db.prepare('UPDATE scans SET status = ? WHERE id = ?').run('completed', scanId);
       } catch (err) {
         console.error('Scan error:', err);
@@ -354,14 +570,28 @@ async function startServer() {
 
   // Stack Gap Analyzer
   app.post('/api/stack-gap/analyze', async (req, res) => {
-    const { url, method, headers } = req.body;
+    const { url, method, headers, sessionId } = req.body as {
+      url: string;
+      method?: string;
+      headers?: Record<string, string>;
+      sessionId?: string;
+    };
     try {
+      // Pre-flight: validate session overlay applies to target before kicking
+      // off the async job.
+      if (sessionId) {
+        try { SessionVault.buildRequestOverlay(sessionId, url); }
+        catch (err) {
+          if (err instanceof SessionScopeError) return res.status(err.status).json({ error: err.message });
+          throw err;
+        }
+      }
       const fingerprint = await StackGapAnalyzer.fingerprint(url);
-      
+
       // Run analysis asynchronously
       setTimeout(async () => {
         try {
-          await StackGapAnalyzer.analyze(url, method, headers);
+          await StackGapAnalyzer.analyze(url, method ?? 'GET', headers ?? {}, sessionId);
         } catch (err) {
           console.error('Stack Gap Analysis error:', err);
         }
@@ -380,9 +610,17 @@ async function startServer() {
 
   // Automation Engine
   app.post('/api/automation/start', async (req, res) => {
-    const { targetUrl } = req.body;
+    const { targetUrl, sessionId } = req.body as { targetUrl: string; sessionId?: string };
     try {
-      const jobId = await AutomationEngine.startJob(targetUrl);
+      // Pre-flight: validate session overlay applies to target before launch.
+      if (sessionId) {
+        try { SessionVault.buildRequestOverlay(sessionId, targetUrl); }
+        catch (err) {
+          if (err instanceof SessionScopeError) return res.status(err.status).json({ error: err.message });
+          throw err;
+        }
+      }
+      const jobId = await AutomationEngine.startJob(targetUrl, { sessionId });
       res.json({ id: jobId, status: 'running' });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

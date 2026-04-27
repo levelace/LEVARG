@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Play, CheckCircle2, XCircle, Clock, Download, FileJson, FileText, FileCode2, Terminal, AlertCircle, Activity } from 'lucide-react';
+import SessionSelector from './SessionSelector';
 
 export default function AutomationDashboard() {
   const [targetUrl, setTargetUrl] = useState('');
@@ -9,6 +10,7 @@ export default function AutomationDashboard() {
   const [loading, setLoading] = useState(false);
   const [logFilter, setLogFilter] = useState<'all' | 'info' | 'warn' | 'vuln'>('all');
   const [error, setError] = useState('');
+  const [sessionId, setSessionId] = useState('');
 
   const fetchJobs = async () => {
     try {
@@ -59,7 +61,7 @@ export default function AutomationDashboard() {
       const res = await fetch('/api/automation/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targetUrl })
+        body: JSON.stringify({ targetUrl, sessionId: sessionId || undefined })
       });
       
       const data = await res.json();
@@ -167,7 +169,14 @@ export default function AutomationDashboard() {
             Start Hunt
           </button>
         </div>
-        
+        <div className="mt-3 relative z-10">
+          <SessionSelector value={sessionId} onChange={setSessionId} />
+          <p className="text-[10px] text-emerald-500/50 font-mono mt-1">
+            When set, the picked session's cookies + auth headers permeate every phase of the hunt
+            (recon, fingerprinting, fuzzing, auth audit). Out-of-scope hosts are auto-skipped.
+          </p>
+        </div>
+
         {error && (
           <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-mono flex items-center gap-2 rounded-md shadow-[0_0_10px_rgba(239,68,68,0.2)]">
             <AlertCircle className="w-4 h-4" /> {error}

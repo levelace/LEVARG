@@ -106,6 +106,26 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(job_id) REFERENCES automation_jobs(id)
   );
+
+  -- Authenticated-testing sessions: named cookie/header bundles bound to a scope.
+  -- A session captured via the built-in browser (or hand-crafted) can be injected
+  -- into Request Lab and Flow Runner so authenticated requests reuse the auth
+  -- material. Bound to scope_id so a session for scope A can never be used
+  -- against scope B.
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    cookies TEXT,        -- JSON array of {name, value, domain, path, expires, httpOnly, secure, sameSite}
+    headers TEXT,        -- JSON object of static headers (Authorization, X-CSRF-Token, ...)
+    storage TEXT,        -- JSON {localStorage:{}, sessionStorage:{}}
+    user_agent TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
+    UNIQUE(scope_id, name)
+  );
 `);
 
 // Migration: Add 'phase' column to 'automation_jobs' if it doesn't exist

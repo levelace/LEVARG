@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Save, Copy, Terminal, FlaskConical, AlertCircle, Clock, Database, Sparkles, History, Plus } from 'lucide-react';
 import Markdown from 'react-markdown';
+import SessionSelector from './SessionSelector';
 
 export default function RequestLab({ initialRequest }: { initialRequest?: any }) {
   const [method, setMethod] = useState('GET');
@@ -10,6 +11,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
   const [response, setResponse] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [sessionId, setSessionId] = useState('');
   
   const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -71,7 +73,8 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
           method,
           url,
           headers: JSON.parse(headers),
-          body: body ? (method === 'GET' ? undefined : body) : undefined
+          body: body ? (method === 'GET' ? undefined : body) : undefined,
+          sessionId: sessionId || undefined
         })
       });
       const data = await res.json();
@@ -137,7 +140,8 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
           </h2>
           <p className="text-[10px] text-emerald-500/70 font-mono uppercase tracking-widest mt-1">Raw HTTP Manipulation & Replay</p>
         </div>
-        <div className="flex gap-4">
+        <div className="flex gap-4 items-center">
+          <SessionSelector value={sessionId} onChange={setSessionId} />
           {response && (
             <button
               onClick={analyzeResponse}
