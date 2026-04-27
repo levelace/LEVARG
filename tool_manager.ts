@@ -636,7 +636,7 @@ export class ToolManager {
       );
       if (probe.status === 200) {
         const body = typeof probe.data === 'string' ? probe.data : JSON.stringify(probe.data ?? '');
-        wildcardCanary = body.slice(0, 256);
+        wildcardCanary = body.slice(0, 2000);
       }
     } catch { /* origin may be unreachable; skip */ }
 
@@ -648,7 +648,7 @@ export class ToolManager {
           const res = await axios.get(url, { timeout: 4000, validateStatus: () => true, maxRedirects: 0 });
           const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '');
           if (res.status === 404) return null;
-          if (wildcardCanary && res.status === 200 && body.slice(0, 256) === wildcardCanary) return null;
+          if (wildcardCanary && res.status === 200 && body.slice(0, 2000) === wildcardCanary) return null;
           return { url, status: res.status, bodyLen: body.length };
         } catch {
           return null;

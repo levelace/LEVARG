@@ -906,11 +906,12 @@ export class AutomationEngine {
               for (const line of pathResult.stdout.split('\n').filter(Boolean)) {
                 try {
                   const entry = JSON.parse(line) as { url: string; status: number; bodyLen: number };
-                  const body = '';
-                  if (entry.status === 200 && !this.isWildcardResponse(assetHostname, body)) {
+                  // polyfillPathEnumeration already filters wildcard-200 responses
+                  // via a 2000-char canary comparison, so surviving 200s are genuine.
+                  if (entry.status === 200) {
                     this.log(jobId, 'info', `Discovered hidden endpoint: ${entry.url} [${entry.status}]`);
                     endpoints.push({ url: entry.url, method: 'GET' });
-                  } else if (entry.status !== 404 && entry.status !== 200) {
+                  } else if (entry.status !== 404) {
                     this.log(jobId, 'info', `Potential interesting endpoint: ${entry.url} [${entry.status}]`);
                     endpoints.push({ url: entry.url, method: 'GET' });
                   }
