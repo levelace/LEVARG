@@ -13,7 +13,7 @@ interface Credential {
   label: string;
   username: string;
   password?: string;
-  password_set: boolean;
+  has_password: boolean;
   notes: string | null;
   created_at: string;
   updated_at: string;
@@ -237,7 +237,7 @@ export default function CredentialsPanel() {
                 <div className="text-[11px] text-zinc-500">
                   Scope: <span className="text-emerald-400">{c.scope_domain ?? '(deleted)'}</span> ·
                   user: <span className="text-emerald-300">{c.username}</span> · password{' '}
-                  {c.password_set ? (
+                  {c.has_password ? (
                     <span className="text-emerald-500">stored</span>
                   ) : (
                     <span className="text-amber-400">missing</span>
