@@ -15,6 +15,11 @@ import { OllamaClient } from './ollama_client.js';
 import { OllamaManager } from './ollama_manager.js';
 import { SessionVault, SessionScopeError, type SessionCookie, type SessionStorage } from './session_vault.js';
 import { BrowserManager } from './browser_manager.js';
+import { CredentialVault } from './credential_vault.js';
+import { AuthFlowVault, type AuthFlowStep, type TriggerMode } from './auth_flow_vault.js';
+import { ExtensionTokenVault } from './extension_token_vault.js';
+import { detectLoginForm } from './form_detector.js';
+import { USER_AGENTS, getUserAgent, pickRandomBrowserUA } from './user_agents.js';
 
 async function startServer() {
   // Auto-install, start, and pull model for Ollama (runs in background)
@@ -414,6 +419,385 @@ async function startServer() {
     res.json({ success: true });
   });
 
+  // --- Stored credentials (scope-bound) ---
+  // The operator-input side of authenticated testing: stores the username +
+  // password pair an auth-flow will type into the in-scope login form. Bound
+  // 1:1 to a Scope so credentials for scope A can never be replayed against
+  // scope B. Plaintext at rest by design (matches Burp/ZAP project files);
+  // the password is redacted in list/get responses unless the caller is the
+  // auth-flow runner.
+
+  app.get('/api/credentials', (req, res) => {
+    try {
+      const scopeId = typeof req.query.scopeId === 'string' ? req.query.scopeId : undefined;
+      const rows = CredentialVault.list(scopeId).map((r) => CredentialVault.toPublic(r, false));
+      res.json(rows);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/credentials/:id', (req, res) => {
+    const row = CredentialVault.get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Credential not found' });
+    res.json(CredentialVault.toPublic(row, false));
+  });
+
+  app.post('/api/credentials', (req, res) => {
+    try {
+      const { scopeId, label, username, password, notes } = req.body as {
+        scopeId: string;
+        label: string;
+        username: string;
+        password: string;
+        notes?: string | null;
+      };
+      if (!scopeId) return res.status(400).json({ error: 'scopeId is required' });
+      const created = CredentialVault.create({ scopeId, label, username, password, notes });
+      res.json(CredentialVault.toPublic(created, false));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/credentials/:id', (req, res) => {
+    try {
+      const { label, username, password, notes } = req.body as {
+        label?: string;
+        username?: string;
+        password?: string;
+        notes?: string | null;
+      };
+      const updated = CredentialVault.update(req.params.id, { label, username, password, notes });
+      res.json(CredentialVault.toPublic(updated, false));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/credentials/:id', (req, res) => {
+    const ok = CredentialVault.delete(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Credential not found' });
+    res.json({ success: true });
+  });
+
+  // --- Auth flows (scope-bound login macros) ---
+  // Replayable login sequences played against the built-in browser; the
+  // resulting cookie jar is captured into a SessionVault session bound to
+  // the same scope. See auth_flow_vault.ts for the per-step scope guards.
+
+  app.get('/api/auth-flows', (req, res) => {
+    try {
+      const scopeId = typeof req.query.scopeId === 'string' ? req.query.scopeId : undefined;
+      res.json(AuthFlowVault.list(scopeId));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/auth-flows/:id', (req, res) => {
+    const flow = AuthFlowVault.get(req.params.id);
+    if (!flow) return res.status(404).json({ error: 'Auth flow not found' });
+    res.json(flow);
+  });
+
+  app.post('/api/auth-flows', (req, res) => {
+    try {
+      const { scopeId, name, steps, credentialId, triggerMode, isDefault } = req.body as {
+        scopeId: string;
+        name: string;
+        steps: AuthFlowStep[];
+        credentialId?: string | null;
+        triggerMode?: TriggerMode;
+        isDefault?: boolean;
+      };
+      if (!scopeId) return res.status(400).json({ error: 'scopeId is required' });
+      const created = AuthFlowVault.create({
+        scopeId,
+        name,
+        steps,
+        credentialId,
+        triggerMode,
+        isDefault,
+      });
+      res.json(created);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/auth-flows/:id', (req, res) => {
+    try {
+      const { name, steps, credentialId, triggerMode, isDefault } = req.body as {
+        name?: string;
+        steps?: AuthFlowStep[];
+        credentialId?: string | null;
+        triggerMode?: TriggerMode;
+        isDefault?: boolean;
+      };
+      const updated = AuthFlowVault.update(req.params.id, {
+        name,
+        steps,
+        credentialId,
+        triggerMode,
+        isDefault,
+      });
+      res.json(updated);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/auth-flows/:id', (req, res) => {
+    const ok = AuthFlowVault.delete(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Auth flow not found' });
+    res.json({ success: true });
+  });
+
+  app.post('/api/auth-flows/:id/run', async (req, res) => {
+    try {
+      const result = await AuthFlowVault.run(req.params.id, {
+        sessionLabel: typeof req.body?.sessionLabel === 'string' ? req.body.sessionLabel : undefined,
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Login form auto-detect (heuristic) ---
+  // Fetches the given URL through the same scope gate that protects /api/lab/proxy,
+  // runs the heuristic detector, and returns the inferred selectors. The UI uses
+  // this to pre-populate auth-flow steps so the operator doesn't have to write
+  // selectors by hand for the common case.
+  app.post('/api/auth-flows/detect', async (req, res) => {
+    try {
+      const { url } = req.body as { url: string };
+      if (!url) return res.status(400).json({ error: 'url is required' });
+      const targetHost = new URL(url).hostname;
+      const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
+      const inScope = scopes.some(
+        (s) => targetHost === s.domain || targetHost.endsWith(`.${s.domain}`),
+      );
+      if (!inScope) {
+        return res.status(403).json({ error: 'Target is not in any registered scope' });
+      }
+      const userAgentId = typeof req.body?.userAgentId === 'string' ? req.body.userAgentId : undefined;
+      const response = await axios.get(url, {
+        validateStatus: () => true,
+        timeout: 10000,
+        headers: { 'User-Agent': getUserAgent(userAgentId) ?? pickRandomBrowserUA() },
+      });
+      const html = typeof response.data === 'string' ? response.data : '';
+      const detected = detectLoginForm(html, url);
+      if (!detected) {
+        return res.json({ detected: null, message: 'No login form detected on this page' });
+      }
+      // Pre-populate steps the operator can save as a flow.
+      const steps: AuthFlowStep[] = [{ type: 'goto', url, waitFor: 'networkidle2' }];
+      if (detected.usernameSelector) {
+        steps.push({ type: 'fill', selector: detected.usernameSelector, value: '${USERNAME}' });
+      }
+      if (!detected.hasMultiStep) {
+        steps.push({
+          type: 'fill',
+          selector: detected.passwordSelector,
+          value: '${PASSWORD}',
+          secret: true,
+        });
+      }
+      if (detected.submitSelector) {
+        steps.push({ type: 'click', selector: detected.submitSelector });
+      } else {
+        steps.push({ type: 'press', key: 'Enter' });
+      }
+      res.json({ detected, suggestedSteps: steps });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- User-Agent catalog ---
+  // Real, curated UA strings (browsers across Windows/macOS/Linux/Android/iOS,
+  // plus enterprise security tools). Used by the auth-flow editor's UA picker
+  // and by Request Lab / Scanner when the operator wants to override the
+  // default UA (e.g. announce as Burp on a sanctioned engagement).
+  app.get('/api/user-agents', (_req, res) => {
+    res.json(USER_AGENTS);
+  });
+
+  // --- OS-browser bridge (extension / bookmarklet / manual paste) ---
+  // The bridge lets the operator complete login in their PRIMARY browser
+  // (where their password manager / biometric auth / saved sessions live)
+  // instead of inside the headless puppeteer Chromium. Cookies flow back
+  // into LEVARG via /api/extension/cookies, gated by a per-scope token so
+  // the bridge can never leak cookies into the wrong scope.
+
+  app.get('/api/extension/tokens', (req, res) => {
+    try {
+      const scopeId = typeof req.query.scopeId === 'string' ? req.query.scopeId : undefined;
+      res.json(ExtensionTokenVault.list(scopeId));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/extension/tokens', (req, res) => {
+    try {
+      const { scopeId, label } = req.body as { scopeId: string; label?: string | null };
+      if (!scopeId) return res.status(400).json({ error: 'scopeId is required' });
+      const created = ExtensionTokenVault.create({ scopeId, label });
+      res.json(created);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/extension/tokens/:id', (req, res) => {
+    const ok = ExtensionTokenVault.delete(req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Token not found' });
+    res.json({ success: true });
+  });
+
+  // Cookie ingest — called by the extension, the bookmarklet, or the manual-
+  // paste UI. Any cookie whose host is outside the token's bound scope is
+  // silently dropped (logged but not stored), so a cookie jar containing
+  // accounts.google.com / appleid.apple.com cookies can't smuggle creds
+  // into a session bound to a different scope.
+  app.post('/api/extension/cookies', (req, res) => {
+    try {
+      const { token, sessionName, cookies, storage, userAgent } = req.body as {
+        token: string;
+        sessionName?: string;
+        cookies: SessionCookie[];
+        storage?: SessionStorage;
+        userAgent?: string | null;
+      };
+      if (!token) return res.status(400).json({ error: 'token is required' });
+      if (!Array.isArray(cookies)) return res.status(400).json({ error: 'cookies must be an array' });
+      const tokenRow = ExtensionTokenVault.getByToken(token);
+      if (!tokenRow) return res.status(401).json({ error: 'Unknown extension token' });
+      if (!tokenRow.scope_domain) {
+        return res.status(409).json({ error: 'Token references a scope that no longer exists' });
+      }
+      const scopeDomain = tokenRow.scope_domain;
+      const accepted: SessionCookie[] = [];
+      const droppedHosts = new Set<string>();
+      for (const c of cookies) {
+        const d = (c.domain ?? '').replace(/^\./, '');
+        if (!d) {
+          // Host-only cookie with no domain field — accept; ingest path infers domain at replay.
+          accepted.push(c);
+          continue;
+        }
+        if (d === scopeDomain || d.endsWith(`.${scopeDomain}`)) {
+          accepted.push(c);
+        } else {
+          droppedHosts.add(d);
+        }
+      }
+      const created = SessionVault.create({
+        scopeId: tokenRow.scope_id,
+        name:
+          (sessionName?.trim() && sessionName.trim()) ||
+          `os-browser:${new Date().toISOString().replace(/[:.]/g, '-')}`,
+        cookies: accepted,
+        headers: {},
+        storage: storage ?? {},
+        userAgent: userAgent ?? null,
+        notes: `Captured via OS-browser bridge (token ${tokenRow.id}). Dropped ${droppedHosts.size} out-of-scope host(s).`,
+      });
+      ExtensionTokenVault.recordUse(token);
+      res.json({
+        sessionId: created.id,
+        accepted: accepted.length,
+        droppedOutOfScope: droppedHosts.size,
+        droppedHosts: Array.from(droppedHosts),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Streams the contents of `extension/` as a tar.gz so the operator can
+  // grab the OS-browser bridge from any LEVARG instance without needing the
+  // full repo. Tar (not zip) keeps the dependency footprint to nothing —
+  // Node has built-in tar support via child_process.
+  app.get('/api/extension/download', (_req, res) => {
+    const dir = path.join(process.cwd(), 'extension');
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader('Content-Disposition', 'attachment; filename="levarg-bridge.tar.gz"');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { spawn } = require('child_process') as typeof import('child_process');
+    const tar = spawn('tar', ['-czf', '-', '-C', dir, '.']);
+    tar.stdout.pipe(res);
+    tar.on('error', (e: Error) => {
+      res.destroy(e);
+    });
+  });
+
+  // Bookmarklet generator: returns a `javascript:` URL the operator can drag
+  // to their bookmarks bar. Clicking it on any page POSTs that page's
+  // document.cookie + localStorage back to LEVARG. HttpOnly cookies are NOT
+  // captured (browser limit, not LEVARG's) — this is the mobile fallback;
+  // the extension is the strong path.
+  app.get('/api/extension/bookmarklet', (req, res) => {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    const ingestUrl = typeof req.query.ingestUrl === 'string' ? req.query.ingestUrl : '';
+    if (!token || !ingestUrl) {
+      return res.status(400).json({ error: 'token and ingestUrl are required' });
+    }
+    const ingestUrlJson = JSON.stringify(ingestUrl);
+    const tokenJson = JSON.stringify(token);
+    // Built as a single-line javascript: URL. fetch() the ingest endpoint
+    // with the page's accessible cookies. Body is read by the inner script
+    // so the operator can see any error inline.
+    const script = `(function(){var c=document.cookie.split(';').map(function(p){var i=p.indexOf('=');var n=p.slice(0,i).trim();var v=p.slice(i+1);return{name:n,value:v,domain:location.hostname,path:'/'}}).filter(function(c){return c.name});var ls={};try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);ls[k]=localStorage.getItem(k)}}catch(e){}fetch(${ingestUrlJson},{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:${tokenJson},sessionName:'bookmarklet:'+location.hostname,cookies:c,storage:{localStorage:ls},userAgent:navigator.userAgent})}).then(function(r){return r.json()}).then(function(j){alert('LEVARG: captured '+j.accepted+' cookies, dropped '+(j.droppedOutOfScope||0)+' out of scope. session='+j.sessionId)}).catch(function(e){alert('LEVARG ingest failed: '+e.message)})})();`;
+    const url = `javascript:${encodeURI(script)}`;
+    res.json({ bookmarklet: url });
+  });
+
+  // Pairing landing page — the operator opens this on their primary device
+  // (phone or desktop). Walks them through extension install, bookmarklet
+  // drag, or manual paste, with the token pre-filled. Pure HTML, no React,
+  // so it works even on mobile browsers that can't run the SPA.
+  app.get('/pair/:token', (req, res) => {
+    const token = req.params.token;
+    const row = ExtensionTokenVault.getByToken(token);
+    if (!row) {
+      res.status(404).type('html').send('<h1>Unknown pairing token</h1>');
+      return;
+    }
+    const scopeDomain = row.scope_domain ?? '(scope deleted)';
+    const ingestUrl = `${req.protocol}://${req.get('host')}/api/extension/cookies`;
+    const bookmarkletUrl = `${req.protocol}://${req.get('host')}/api/extension/bookmarklet?token=${encodeURIComponent(token)}&ingestUrl=${encodeURIComponent(ingestUrl)}`;
+    res.type('html').send(`<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LEVARG — pair OS browser</title>
+<style>body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#111}h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}code{background:#f3f3f3;padding:.1rem .35rem;border-radius:.25rem;word-break:break-all}.token{font-family:ui-monospace,monospace;font-size:.85rem;background:#fafafa;padding:.5rem;border:1px solid #ddd;border-radius:.4rem;word-break:break-all}.warn{color:#a40;font-size:.9rem}</style>
+</head><body>
+<h1>Pair your browser to LEVARG</h1>
+<p>Bound scope: <code>${scopeDomain}</code></p>
+<p>Token (copy this into the LEVARG extension's options page):</p>
+<div class="token">${token}</div>
+<h2>Option A — install the extension (desktop)</h2>
+<p>Recommended for HttpOnly cookies (auth cookies are usually HttpOnly).</p>
+<ol><li>The extension lives in the LEVARG repo at <code>extension/</code>. If you have the repo locally, point Chrome at that folder; otherwise download a tarball: <code>curl -O ${req.protocol}://${req.get('host')}/api/extension/download</code></li>
+<li>Open <code>chrome://extensions</code>, enable Developer Mode, click Load Unpacked, select the <code>extension/</code> folder.</li>
+<li>Open the extension's options page, paste the token above, set ingest URL to <code>${ingestUrl}</code>, save.</li>
+<li>Log in to <code>${scopeDomain}</code> in your normal tab. Click the extension icon → “Capture cookies”.</li></ol>
+<h2>Option B — bookmarklet (mobile or no-install)</h2>
+<p class="warn">Bookmarklets cannot read HttpOnly cookies (browser limit). Use the extension when possible.</p>
+<ol><li>Open <a href="${bookmarkletUrl}">this page</a> on the device where you'll log in, save the JSON's <code>bookmarklet</code> field as a bookmark.</li>
+<li>Log in to <code>${scopeDomain}</code> in your normal tab.</li>
+<li>Tap the bookmark on that page — LEVARG ingests whatever cookies the page can see.</li></ol>
+<h2>Option C — manual paste</h2>
+<p>Open DevTools → Application → Cookies, copy as JSON, paste into the LEVARG UI → Sessions → Import. The UI will POST to the same ingest endpoint with this token.</p>
+<p>Ingest endpoint (for tooling): <code>${ingestUrl}</code></p>
+</body></html>`);
+  });
+
+
   // --- Built-in Browser ---
   // Drives a real Chromium under puppeteer-stealth so testers can complete
   // SSO/MFA login flows the headless scanner can't. All captured traffic
@@ -627,7 +1011,11 @@ async function startServer() {
 
   // Automation Engine
   app.post('/api/automation/start', async (req, res) => {
-    const { targetUrl, sessionId } = req.body as { targetUrl: string; sessionId?: string };
+    const { targetUrl, sessionId, authFlowId } = req.body as {
+      targetUrl: string;
+      sessionId?: string;
+      authFlowId?: string;
+    };
     try {
       // Pre-flight: validate session overlay applies to target before launch.
       if (sessionId) {
@@ -637,8 +1025,64 @@ async function startServer() {
           throw err;
         }
       }
-      const jobId = await AutomationEngine.startJob(targetUrl, { sessionId });
-      res.json({ id: jobId, status: 'running' });
+
+      // Pre-flight auth-flow: if the operator picked an auth-flow (or one is
+      // marked default for the target's scope and no explicit session was
+      // passed), replay it now and bind the resulting session to the job.
+      // This is the "start every hunt logged in" trigger.
+      let resolvedSessionId = sessionId;
+      let resolvedAuthFlowId = authFlowId;
+      if (!resolvedAuthFlowId && !resolvedSessionId) {
+        try {
+          const targetHost = new URL(targetUrl).hostname;
+          const scopes = db.prepare('SELECT id, domain FROM scopes').all() as {
+            id: string;
+            domain: string;
+          }[];
+          const matched = scopes.find(
+            (s) => targetHost === s.domain || targetHost.endsWith(`.${s.domain}`),
+          );
+          if (matched) {
+            const def = AuthFlowVault.getDefaultForScope(matched.id);
+            if (def) resolvedAuthFlowId = def.id;
+          }
+        } catch {
+          // invalid URL is caught later inside startJob; ignore here
+        }
+      }
+      if (resolvedAuthFlowId) {
+        const flow = AuthFlowVault.get(resolvedAuthFlowId);
+        if (!flow) return res.status(404).json({ error: 'Auth flow not found' });
+        // Validate the flow's scope covers the target before we burn time on a replay.
+        try {
+          const targetHost = new URL(targetUrl).hostname;
+          if (!flow.scope_domain || !SessionVault.hostInScope(targetHost, flow.scope_domain)) {
+            return res.status(403).json({
+              error: `Auth flow is bound to scope '${flow.scope_domain}' and cannot pre-flight a hunt on '${targetHost}'`,
+            });
+          }
+        } catch {
+          return res.status(400).json({ error: 'Invalid targetUrl' });
+        }
+        const result = await AuthFlowVault.run(resolvedAuthFlowId);
+        if (!result.ok || !result.sessionId) {
+          return res
+            .status(502)
+            .json({ error: `Auth-flow pre-flight failed: ${result.error ?? 'unknown'}`, log: result.log });
+        }
+        resolvedSessionId = result.sessionId;
+      }
+
+      const jobId = await AutomationEngine.startJob(targetUrl, {
+        sessionId: resolvedSessionId,
+        authFlowId: resolvedAuthFlowId,
+      });
+      res.json({
+        id: jobId,
+        status: 'running',
+        sessionId: resolvedSessionId ?? null,
+        authFlowId: resolvedAuthFlowId ?? null,
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

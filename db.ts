@@ -126,6 +126,70 @@ db.exec(`
     FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
     UNIQUE(scope_id, name)
   );
+
+  -- Stored login credentials per scope. Used by auth-flow macros to fill
+  -- login forms during a hunt without re-prompting the operator. Bound 1:1
+  -- to a Scope so credentials for scope A can never be replayed against
+  -- scope B. Plaintext-at-rest by design (matches Burp/ZAP project files);
+  -- the pocforge.db file lives next to the project and inherits the same
+  -- filesystem permissions the operator already grants their tooling.
+  CREATE TABLE IF NOT EXISTS credentials (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
+    UNIQUE(scope_id, label)
+  );
+
+  -- Replayable login macros bound to a scope (and optionally a credential).
+  -- A flow is an ordered list of steps {goto|fill|click|press|waitForSelector|
+  -- waitForUrl|sleep}; runtime checks every navigated/typed URL against the
+  -- bound scope's domain before executing — the operator's stored credentials
+  -- are NEVER typed into a host outside the scope (third-party OAuth providers
+  -- like accounts.google.com / facebook.com / appleid.apple.com are
+  -- explicitly out of scope and require manual login via the built-in browser
+  -- or the OS-browser extension).
+  CREATE TABLE IF NOT EXISTS auth_flows (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    credential_id TEXT,
+    name TEXT NOT NULL,
+    steps TEXT NOT NULL,                    -- JSON array of AuthFlowStep
+    trigger_mode TEXT NOT NULL DEFAULT 'preflight', -- 'preflight' | 'on_401' | 'discovery' | 'all' | 'manual'
+    is_default INTEGER NOT NULL DEFAULT 0,  -- if 1, applied automatically when a hunt starts on this scope without explicit auth_flow_id
+    last_run_at DATETIME,
+    last_status TEXT,                       -- 'ok' | 'error'
+    last_error TEXT,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
+    FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE SET NULL,
+    UNIQUE(scope_id, name)
+  );
+
+  -- Pairing tokens for the OS-browser extension. The operator generates a
+  -- token in the LEVARG UI, pastes it into the extension's options page, and
+  -- the extension can then POST captured cookies to /api/extension/cookies.
+  -- Tokens are scope-bound so an extension paired for scope A can't smuggle
+  -- cookies into a session bound to scope B. last_used_at and request count
+  -- are recorded for audit.
+  CREATE TABLE IF NOT EXISTS extension_tokens (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    label TEXT,
+    last_used_at DATETIME,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE
+  );
 `);
 
 // Migration: Add 'phase' column to 'automation_jobs' if it doesn't exist
