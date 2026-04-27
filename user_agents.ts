@@ -187,6 +187,7 @@ export function defaultHttpIdentityHeaderArgs(): string[] {
   return [
     '-H', `User-Agent: ${id.userAgent}`,
     '-H', `Accept-Language: ${id.acceptLanguage}`,
+    '-H', `Accept-Encoding: ${id.acceptEncoding}`,
     '-H', `Accept: ${id.accept}`,
     '-H', `Sec-Ch-Ua: ${id.secChUa}`,
     '-H', `Sec-Ch-Ua-Mobile: ${id.secChUaMobile}`,
