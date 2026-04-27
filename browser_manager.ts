@@ -165,6 +165,55 @@ export class BrowserManager {
     return this.status();
   }
 
+  /**
+   * Ensure the built-in browser is running for `scopeId`. If a browser is
+   * already running for the same scope, it's reused. If a browser is running
+   * for a *different* scope, an error is thrown — switching scopes requires
+   * an explicit close() so cookie/storage state from one scope can't bleed
+   * into another mid-flow.
+   *
+   * Used by AuthFlowVault to lazily bring up a headless browser for a flow
+   * replay; the `headless` flag defaults to true here (no GUI needed for
+   * automated flow replays) but takes effect only on a fresh launch.
+   */
+  static async ensureRunning(scopeId: string, opts: { headless?: boolean } = {}): Promise<BrowserStatus> {
+    if (this.browser && this.currentScope) {
+      if (this.currentScope.id !== scopeId) {
+        throw new Error(
+          `Browser is bound to scope '${this.currentScope.domain}'. Close it before running an auth-flow for a different scope.`,
+        );
+      }
+      return this.status();
+    }
+    return this.launch({ scopeId, headless: opts.headless ?? true });
+  }
+
+  /**
+   * Open a fresh tab in the current browser. Capture is automatically
+   * attached because the browser-level `targetcreated` listener wired up in
+   * launch() catches every new page. Throws if the browser isn't running.
+   */
+  static async newPage(): Promise<Page> {
+    if (!this.browser) throw new Error('Browser is not running');
+    const page = await this.browser.newPage();
+    return page;
+  }
+
+  /**
+   * Convenience: the puppeteer Browser instance for callers that need to
+   * inspect cookies / pages directly (e.g. AuthFlowVault). Throws if not
+   * running so callers don't accidentally check `null`.
+   */
+  static getBrowserOrThrow(): Browser {
+    if (!this.browser) throw new Error('Browser is not running');
+    return this.browser;
+  }
+
+  /** Read-only accessor for the active scope; null when the browser is down. */
+  static getCurrentScope(): ScopeRow | null {
+    return this.currentScope;
+  }
+
   static async close(): Promise<void> {
     if (!this.browser) return;
     try {

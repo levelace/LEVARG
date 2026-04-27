@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "LEVARG OS-Browser Bridge",
+  "version": "1.0.0",
+  "description": "Capture cookies from your primary browser and ship them into LEVARG's SessionVault for authenticated security testing.",
+  "permissions": ["cookies", "storage", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "LEVARG: capture cookies"
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}

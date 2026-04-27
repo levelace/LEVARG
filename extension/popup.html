@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>LEVARG: capture cookies</title>
+    <style>
+      body { font-family: system-ui, sans-serif; width: 300px; padding: 12px; color: #111; }
+      h1 { font-size: 14px; margin: 0 0 8px; }
+      button { width: 100%; padding: 8px; font-size: 14px; cursor: pointer; }
+      .ok { color: #060; }
+      .err { color: #a00; white-space: pre-wrap; word-break: break-word; }
+      .meta { font-size: 12px; color: #555; margin-top: 8px; }
+      a { font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>LEVARG OS-Browser Bridge</h1>
+    <button id="capture">Capture cookies for this tab</button>
+    <div id="result" class="meta"></div>
+    <p><a href="#" id="open-options">Configure token / ingest URL</a></p>
+    <script src="popup.js"></script>
+  </body>
+</html>

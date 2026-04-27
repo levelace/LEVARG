@@ -11,6 +11,7 @@ import { PayloadOven } from './payload_oven.js';
 import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
 import { SessionVault, SessionScopeError } from './session_vault.js';
+import { AuthFlowVault } from './auth_flow_vault.js';
 import * as net from 'net';
 import * as tls from 'tls';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -32,7 +33,17 @@ axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
 // For URLs outside the session's bound scope (third-party OSINT lookups,
 // IdP probes, public registry queries) the overlay is skipped and the
 // request proceeds unauthenticated rather than failing the whole job.
-export interface JobContext { sessionId?: string }
+// `sessionId` is mutable on the shared context object so the on-401 hook
+// below can swap in a refreshed session captured by an auth-flow replay
+// without interrupting the in-flight phase. `authFlowId` is the flow used
+// for those refreshes; once a refresh is in flight we record the promise on
+// `refreshing` so concurrent 401s don't kick off N parallel replays.
+export interface JobContext {
+  sessionId?: string;
+  authFlowId?: string;
+  jobId?: string;
+  refreshing?: Promise<string | null>;
+}
 export const jobContext = new AsyncLocalStorage<JobContext>();
 
 axios.interceptors.request.use((config) => {
@@ -57,6 +68,86 @@ axios.interceptors.request.use((config) => {
   }
   return config;
 });
+
+// Mid-hunt auto-refresh: if an in-scope request comes back 401, OR comes
+// back 30x with a Location pointing at a /login | /signin | /auth path on
+// the same host, replay the bound auth-flow once and retry the request with
+// the freshly captured session. A response carrying `_levargAuthRetry` has
+// already been retried and is passed through unchanged to avoid loops.
+function looksLikeAuthRedirect(status: number, location: string | undefined): boolean {
+  if (status < 300 || status >= 400) return false;
+  if (!location) return false;
+  return /\/(login|signin|sign-in|auth|account\/login)\b/i.test(location);
+}
+
+axios.interceptors.response.use(
+  (response) => {
+    const ctx = jobContext.getStore();
+    if (!ctx || !ctx.authFlowId || !response.config.url) return response;
+    if ((response.config as { _levargAuthRetry?: boolean })._levargAuthRetry) return response;
+    const status = response.status;
+    const location = (response.headers?.location ?? response.headers?.Location) as
+      | string
+      | undefined;
+    if (status !== 401 && !looksLikeAuthRedirect(status, location)) return response;
+
+    // Only refresh for in-scope hosts — a 401 from an IdP / OSINT lookup is
+    // expected and not actionable.
+    let inScope = false;
+    try {
+      const session = ctx.sessionId ? SessionVault.get(ctx.sessionId) : null;
+      const scope = session?.scope_id ? SessionVault.getScope(session.scope_id) : null;
+      if (scope) {
+        const host = new URL(response.config.url).hostname;
+        inScope = SessionVault.hostInScope(host, scope.domain);
+      }
+    } catch {
+      inScope = false;
+    }
+    if (!inScope) return response;
+
+    const authFlowId = ctx.authFlowId;
+    if (!ctx.refreshing) {
+      ctx.refreshing = (async () => {
+        try {
+          const result = await AuthFlowVault.run(authFlowId);
+          if (result.ok && result.sessionId) {
+            ctx.sessionId = result.sessionId;
+            return result.sessionId;
+          }
+          return null;
+        } catch {
+          return null;
+        } finally {
+          ctx.refreshing = undefined;
+        }
+      })();
+    }
+    return ctx.refreshing.then(async (newSessionId) => {
+      if (!newSessionId) return response;
+      // Retry the original request once with the refreshed session applied.
+      const cfg = { ...response.config, _levargAuthRetry: true } as typeof response.config & {
+        _levargAuthRetry: boolean;
+      };
+      try {
+        const merged = SessionVault.applyToHeaders(
+          newSessionId,
+          cfg.url ?? '',
+          (cfg.headers ?? {}) as Record<string, string>,
+        );
+        (cfg as { headers: unknown }).headers = merged;
+      } catch {
+        // If overlay fails for any reason, fall back to original response.
+        return response;
+      }
+      try {
+        return await axios.request(cfg);
+      } catch {
+        return response;
+      }
+    });
+  },
+);
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -492,13 +583,17 @@ export class AutomationEngine {
     } catch {}
   }
 
-  static async startJob(targetUrl: string, options: { sessionId?: string } = {}): Promise<string> {
+  static async startJob(
+    targetUrl: string,
+    options: { sessionId?: string; authFlowId?: string } = {},
+  ): Promise<string> {
     if (this.activeJobs >= 2) {
       throw new Error('Maximum concurrent jobs (2) reached. Please wait for a job to complete.');
     }
     this.activeJobs++;
     const jobId = uuidv4();
     const sessionId = options.sessionId;
+    const authFlowId = options.authFlowId;
     const ollamaAvailable = await OllamaClient.isAvailable();
     const ai = ollamaAvailable ? new OllamaClient() : null;
     
@@ -523,13 +618,16 @@ export class AutomationEngine {
     if (sessionId) {
       this.log(jobId, 'info', `Authenticated session bound to job; cookies + auth headers will permeate all phases.`);
     }
+    if (authFlowId) {
+      this.log(jobId, 'info', `Auth flow ${authFlowId} bound to job; will auto-refresh session on 401 / login redirect.`);
+    }
 
     setTimeout(() => {
       // Run the entire hunt under a per-job AsyncLocalStorage context so the
       // axios interceptor can apply the session overlay to every outbound
       // call below — including those made transitively by helper modules
       // (StackGapAnalyzer, ToolManager, etc.) that share this axios instance.
-      void jobContext.run({ sessionId }, async () => {
+      void jobContext.run({ sessionId, authFlowId, jobId }, async () => {
       try {
         const allFindings: any[] = [];
         const urlObj = new URL(targetUrl);

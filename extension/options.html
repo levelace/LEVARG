@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>LEVARG bridge — options</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 520px; margin: 2rem auto; padding: 0 1rem; color: #111; }
+      label { display: block; margin-top: 1rem; font-size: 0.95rem; }
+      input { width: 100%; padding: 6px 8px; box-sizing: border-box; font-family: ui-monospace, monospace; font-size: 0.9rem; }
+      button { margin-top: 1rem; padding: 8px 12px; font-size: 0.95rem; cursor: pointer; }
+      .meta { font-size: 0.8rem; color: #555; }
+      .ok { color: #060; margin-top: 0.5rem; }
+    </style>
+  </head>
+  <body>
+    <h1>LEVARG OS-Browser Bridge</h1>
+    <p class="meta">Paste the values shown on your LEVARG pairing page (<code>/pair/&lt;token&gt;</code>).</p>
+    <label>Ingest URL
+      <input id="ingest" type="url" placeholder="http://localhost:3000/api/extension/cookies" />
+    </label>
+    <label>Token
+      <input id="token" type="text" placeholder="paste pairing token" />
+    </label>
+    <button id="save">Save</button>
+    <div id="status" class="ok"></div>
+    <script src="options.js"></script>
+  </body>
+</html>
