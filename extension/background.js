@@ -35,14 +35,18 @@ async function captureForTab(tab) {
     return { ok: false, error: `Refusing to capture from non-http(s) tab '${tab.url}'` };
   }
 
-  // Pull cookies for the entire registrable domain so we get cross-subdomain
-  // session cookies (login cookies often live on `.example.com`, not the
-  // exact subdomain). chrome.cookies.getAll({domain}) does this when given
-  // a bare hostname.
+  // Pull every cookie the browser would send when visiting this URL. Using
+  // {url} (not {domain}) is what we want here: chrome's cookie store filters
+  // by request-relevance, so we transparently get cross-subdomain cookies
+  // set on `.example.com` while loading `sub.example.com`, and we don't have
+  // to extract a registrable domain ourselves. The naive `parts.slice(-2)`
+  // approach we used previously over-captured on multi-part TLDs (.co.uk,
+  // .com.au, .co.jp), where `parts.slice(-2)` returns the public suffix and
+  // chrome.cookies.getAll({domain: 'co.uk'}) would scrape every .co.uk site
+  // in the browser. Server-side scope filtering would still drop those
+  // before storage, but they'd needlessly traverse the network.
   const hostname = url.hostname;
-  const parts = hostname.split('.');
-  const baseDomain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
-  const cookies = await chrome.cookies.getAll({ domain: baseDomain });
+  const cookies = await chrome.cookies.getAll({ url: tab.url });
 
   const body = {
     token,
