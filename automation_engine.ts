@@ -1265,21 +1265,42 @@ export class AutomationEngine {
               const isStatusDiff = baseline && res.status !== baseline.status;
               const isLatencySpike = type === 'SQLi' && latency > 3000;
               
-              // Enhanced error markers per vuln type
+              // Type-specific markers must be probe-induced evidence,
+              // not generic words that occur naturally in benign content.
+              // Old markers triggered FPs on user lists ('root:'),
+              // metadata field names ('uid='), the literal number 49
+              // appearing anywhere in JSON, or NoSQL operators echoed
+              // back from the URL ('$gt' / '$ne').
               const errorMarkers: Record<string, string[]> = {
-                'SQLi': ['sql syntax', 'mysql', 'postgresql', 'sqlite', 'ora-', 'mssql', 'unclosed quotation', 'quoted string', 'syntax error at'],
+                'SQLi': ['sql syntax', 'mysql_fetch', 'postgresql', 'sqlite_', 'ora-00', 'ora-01', 'mssql', 'unclosed quotation', 'quoted string not properly terminated', 'syntax error at or near', 'sqlstate['],
                 'XSS': [customPayload, '<script>', 'onerror=', 'onload='],
-                'Path Traversal': ['root:', '/bin/', 'win.ini', '[extensions]', 'etc/passwd'],
-                'RCE': ['uid=', 'gid=', 'root:', 'www-data'],
-                'SSTI': ['49', '7777777', '__class__', 'config'],
-                'SSRF': ['ami-id', 'instance-id', 'computeMetadata'],
-                'NoSQLi': ['$gt', '$ne', 'CastError', 'ObjectId'],
+                'Path Traversal': ['root:x:0:0:', 'daemon:x:', '[fonts]', '[extensions]', '/bin/bash', '/bin/sh', '/sbin/nologin', '[boot loader]'],
+                'RCE': [/\buid=\d+\([\w-]+\)/i, /\bgid=\d+\([\w-]+\)/i, 'root:x:0:0:', 'www-data:x:', /\bbin\/bash\b/, /Linux \S+ \d+\.\d+/],
+                'SSTI': ['>49<', '"value":49', '=49&', ': 49,', ': 49}', '7777777', '__class__', 'mro__', 'subclasses__'],
+                'SSRF': ['ami-id', 'instance-id', 'computeMetadata', 'iam/security-credentials', 'metadata.google.internal'],
+                'NoSQLi': ['CastError', 'ObjectId', 'MongoError:', 'BSON', 'unknown top level operator'],
               };
               
               const typeMarkers = errorMarkers[type] || [];
               const bodyLower = bodyStr.toLowerCase();
-              const hasTypeMarkers = typeMarkers.some(m => bodyLower.includes(m.toLowerCase()));
-              const hasGenericError = bodyLower.includes('error') || bodyLower.includes('exception') || bodyLower.includes('stack trace');
+              const baselineLower = (baseline?.body || '').toLowerCase();
+              const matchMarker = (m: string | RegExp): boolean => {
+                if (m instanceof RegExp) {
+                  return m.test(bodyStr) && !m.test(baseline?.body || '');
+                }
+                const ml = m.toLowerCase();
+                // Marker must be NEW vs baseline — frameworks ship the
+                // word 'config' and the string 'ObjectId' in their JS
+                // bundles; only count it if the probe induced it.
+                return bodyLower.includes(ml) && !baselineLower.includes(ml);
+              };
+              const hasTypeMarkers = typeMarkers.some(matchMarker);
+
+              // Generic error words gated by baseline-diff: 'error' /
+              // 'exception' / 'stack trace' all appear in benign React
+              // bundles and JSON copy. Only count NEW occurrences.
+              const genericErrorRe = /\b(?:error|exception|stack trace|stacktrace|traceback|fatal error)\b/i;
+              const hasGenericError = genericErrorRe.test(bodyStr) && !genericErrorRe.test(baseline?.body || '');
 
               // Verification trigger: need at least one indicator
               if (ai && (isStatusDiff || isLatencySpike || hasTypeMarkers || (hasGenericError && isStatusDiff))) {
@@ -1355,7 +1376,13 @@ export class AutomationEngine {
           { name: 'CRLF injection', value: 'test%0d%0aInjected-Header:%20true', markers: ['Injected-Header', 'injected-header'] },
           { name: 'Unicode normalization', value: '\u{FF0E}\u{FF0E}/\u{FF0E}\u{FF0E}/etc/passwd', markers: ['root:x:0:0:', 'daemon:x:', '/bin/bash'] },
           { name: 'Template expression', value: '${7*7}{{7*7}}<%= 7*7 %>${{7*7}}#{7*7}', markers: ['>49<', '"value":49', '=49&', ': 49,', ': 49}'] },
-          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>', markers: ['root:x:0:0:', 'XML parse error', 'External entity'] },
+          // Target /etc/passwd (deterministic shape) instead of /etc/hostname
+          // (free-form value we couldn't match without knowing it ahead of
+          // time). 'root:x:0:0:' / 'daemon:x:' catch successful external-
+          // entity expansion; 'XML parse error' / 'ParseError' / 'External
+          // entity' catch the parser-error-leak case where the server
+          // failed to disable entities and complained.
+          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>', markers: ['root:x:0:0:', 'daemon:x:', 'XML parse error', 'External entity', 'ParseError', 'lookupSystemId'] },
           { name: 'GraphQL introspection', value: '{"query":"{__schema{types{name}}}"}', markers: ['__schema', '__type', 'queryType', '"types":[{"name"'] },
           { name: 'Polyglot XSS/SQLi', value: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e", markers: ['oNcliCk=alert()', 'oNloAd=alert()', '<sVg', 'jaVasCript:'] },
         ];
@@ -1516,8 +1543,16 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
         for (const ep of zerodayTargets.slice(0, 10)) {
           if (diffCount >= 5) break;
           try {
-            const variants = [
-              { name: 'Case variation', url: ep.url.replace(/\/([a-z])/g, (_, c: string) => `/${c.toUpperCase()}`) },
+            // 'Case variation' is intentionally narrow now: most real
+            // servers are case-sensitive on path matching, so an
+            // uppercased URL produces 404 (or completely different
+            // routes) on a benign target — the old `accessEscalation
+            // || (statusDiff && contentDiff)` then flagged the 404
+            // page as a parser differential. We mark it `escalationOnly`
+            // so the ground-truth check below requires a 403 → 200
+            // transition, not just any status difference.
+            const variants: { name: string; url: string; escalationOnly?: boolean }[] = [
+              { name: 'Case variation', url: ep.url.replace(/\/([a-z])/g, (_, c: string) => `/${c.toUpperCase()}`), escalationOnly: true },
               { name: 'Trailing dot', url: ep.url.replace(/(https?:\/\/[^/]+)/, '$1.') },
               { name: 'Double slash', url: ep.url.replace(/(https?:\/\/[^/]+)(\/.*)?$/, '$1/$2') },
               { name: 'Tab in path', url: ep.url.replace(/\/([^/]+)$/, '/\t$1') },
@@ -1539,7 +1574,17 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
                 const accessEscalation = baseRes.status === 403 && varRes.status === 200;
                 const contentDiff = baseBody !== varBody && Math.abs(baseBody.length - varBody.length) > 100;
 
-                if (accessEscalation || (statusDiff && contentDiff)) {
+                // Variants flagged as escalationOnly (e.g. case variation
+                // on case-sensitive servers) require a 403 → 200
+                // transition; bare statusDiff+contentDiff is insufficient
+                // because case-sensitive routes legitimately return
+                // different content for /Foo vs /foo without any
+                // bypass involved.
+                const isHit = variant.escalationOnly
+                  ? accessEscalation
+                  : (accessEscalation || (statusDiff && contentDiff));
+
+                if (isHit) {
                   this.log(jobId, 'vuln', `DIFFERENTIAL ANOMALY [${variant.name}]: ${ep.url}`, {
                     original: { status: baseRes.status, length: baseBody.length },
                     variant: { status: varRes.status, length: varBody.length, url: variant.url },
@@ -2703,12 +2748,26 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 if (implicitRes.status === 302 || implicitRes.status === 200) {
                   const loc = String(implicitRes.headers['location'] || '');
                   const body = typeof implicitRes.data === 'string' ? implicitRes.data : JSON.stringify(implicitRes.data);
-                  if (loc.includes('access_token') || body.includes('access_token')) {
-                    this.log(jobId, 'vuln', `IMPLICIT FLOW ENABLED: ${ep.url}`);
+                  // Implicit flow leaves the access token in the URL
+                  // fragment, e.g. Location: https://app/cb#access_token=<jwt>&token_type=Bearer.
+                  // The bare substring 'access_token' appears in every JS
+                  // bundle that references the OAuth spec, in API
+                  // documentation, in error messages — not a signal. We
+                  // require either a fragment-shaped token (#...access_token=<value>)
+                  // or an actual JSON token value in the body
+                  // ("access_token":"<value>").
+                  const fragmentTokenRe = /#[^\s]*access_token=[A-Za-z0-9._\-]{8,}/;
+                  const jsonTokenRe = /"access_token"\s*:\s*"[A-Za-z0-9._\-]{8,}"/;
+                  const tokenInLocation = fragmentTokenRe.test(loc);
+                  const tokenInBody = jsonTokenRe.test(body);
+                  if (tokenInLocation || tokenInBody) {
+                    this.log(jobId, 'vuln', `IMPLICIT FLOW ENABLED: ${ep.url}`, {
+                      where: tokenInLocation ? 'URL fragment' : 'response body',
+                    });
                     MemoryManager.addFinding(jobId, hostname, {
                       type: 'Auth Vulnerability', subtype: 'Implicit flow enabled',
                       endpoint: ep.url,
-                      gap: 'OAuth implicit flow (response_type=token) is enabled — tokens exposed in URL fragment',
+                      gap: `OAuth implicit flow (response_type=token) is enabled — token returned in ${tokenInLocation ? 'URL fragment' : 'response body'}`,
                       chain_potential: 'Token theft via referrer leak, browser history, or open redirect',
                       severity: 'HIGH',
                     });
