@@ -12,6 +12,7 @@ import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
 import { SessionVault, SessionScopeError } from './session_vault.js';
 import { AuthFlowVault } from './auth_flow_vault.js';
+import { DEFAULT_HTTP_IDENTITY, defaultHttpIdentityHeaderArgs } from './user_agents.js';
 import * as net from 'net';
 import * as tls from 'tls';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -45,6 +46,44 @@ export interface JobContext {
   refreshing?: Promise<string | null>;
 }
 export const jobContext = new AsyncLocalStorage<JobContext>();
+
+// --- HTTP client fingerprint ---------------------------------------------
+// Auto-Hunter runs over plain axios; without intervention it ships
+// `User-Agent: axios/<version>` and zero client-hints, which Akamai /
+// Cloudflare / Imperva trivially fingerprint as a non-browser. Layer a
+// real Linux Chrome identity (UA + Sec-Ch-Ua family + Accept/Accept-* +
+// Sec-Fetch-* navigation triple) onto every outbound request. Probe-side
+// payloads that intentionally set a header (e.g. UA-based SQLi, header
+// smuggling, security-tool spoofs) are preserved — we never overwrite
+// case-insensitively. Registered BEFORE the session overlay so cookies
+// and bound auth headers still win on collision.
+function applyDefaultIdentity(headers: Record<string, string | undefined>) {
+  const set = (k: string, v: string) => {
+    const existing = Object.keys(headers).find(h => h.toLowerCase() === k.toLowerCase());
+    if (existing && headers[existing] !== undefined && headers[existing] !== '') return;
+    headers[k] = v;
+  };
+  const id = DEFAULT_HTTP_IDENTITY;
+  set('User-Agent', id.userAgent);
+  set('Accept', id.accept);
+  set('Accept-Language', id.acceptLanguage);
+  set('Accept-Encoding', id.acceptEncoding);
+  set('Sec-Ch-Ua', id.secChUa);
+  set('Sec-Ch-Ua-Mobile', id.secChUaMobile);
+  set('Sec-Ch-Ua-Platform', id.secChUaPlatform);
+  set('Sec-Fetch-Site', id.secFetchSite);
+  set('Sec-Fetch-Mode', id.secFetchMode);
+  set('Sec-Fetch-User', id.secFetchUser);
+  set('Sec-Fetch-Dest', id.secFetchDest);
+  set('Upgrade-Insecure-Requests', id.upgradeInsecureRequests);
+}
+
+axios.interceptors.request.use((config) => {
+  const headers = (config.headers ?? {}) as Record<string, string | undefined>;
+  applyDefaultIdentity(headers);
+  (config as { headers: unknown }).headers = headers;
+  return config;
+});
 
 axios.interceptors.request.use((config) => {
   const ctx = jobContext.getStore();
@@ -347,7 +386,16 @@ export class AutomationEngine {
         const isStatusDiff = res1.status !== res2.status;
         const body1 = typeof res1.data === 'string' ? res1.data : JSON.stringify(res1.data);
         const body2 = typeof res2.data === 'string' ? res2.data : JSON.stringify(res2.data);
-        const isBodyDiff = body1 !== body2;
+        // Strict body equality is too loose: nearly every response differs by a
+        // CSRF token / request id / timestamp. Require either a meaningful size
+        // delta or a divergence in user-existence error markers, plus we still
+        // count any HTTP status difference and an x-response-time timing oracle.
+        const sizeDiff = Math.abs(body1.length - body2.length);
+        const enumMarkerRe = /(?:user|account|email|username)[^.\n]{0,40}(?:not\s*found|does\s*not\s*exist|already\s*(?:exists|registered|in[-\s]?use|taken)|invalid|unknown|no\s*such)\b|\bno\s*such\s+(?:user|account|email|username)\b|\b(?:invalid|unknown)\s+(?:user|account|email|username)\b/i;
+        const m1 = enumMarkerRe.test(body1);
+        const m2 = enumMarkerRe.test(body2);
+        const markerDiffers = m1 !== m2;
+        const isBodyDiff = sizeDiff > 200 || markerDiffers;
         const isTimingDiff = Math.abs((res1.headers['x-response-time'] ? parseInt(res1.headers['x-response-time'] as string) : 0) - (res2.headers['x-response-time'] ? parseInt(res2.headers['x-response-time'] as string) : 0)) > 200;
 
         if ((isStatusDiff || isBodyDiff || isTimingDiff) && ai) {
@@ -692,8 +740,18 @@ export class AutomationEngine {
 
         for (const asset of discoveredAssets.slice(0, 5)) {
           try {
-            const httpxResult = await ToolManager.execute('httpx', [asset], jobId,
-              () => ToolManager.polyfillHttpx(asset));
+            const httpxResult = await ToolManager.execute(
+              'httpx',
+              [
+                '-u', asset,
+                '-silent', '-json', '-no-color',
+                '-timeout', '8', '-retries', '1',
+                '-tech-detect', '-status-code', '-title',
+                ...defaultHttpIdentityHeaderArgs(),
+              ],
+              jobId,
+              () => ToolManager.polyfillHttpx(asset)
+            );
             if (httpxResult?.stdout) {
               const data = JSON.parse(httpxResult.stdout);
               techStacks.push({ asset, results: data });
@@ -1265,21 +1323,42 @@ export class AutomationEngine {
               const isStatusDiff = baseline && res.status !== baseline.status;
               const isLatencySpike = type === 'SQLi' && latency > 3000;
               
-              // Enhanced error markers per vuln type
-              const errorMarkers: Record<string, string[]> = {
-                'SQLi': ['sql syntax', 'mysql', 'postgresql', 'sqlite', 'ora-', 'mssql', 'unclosed quotation', 'quoted string', 'syntax error at'],
+              // Type-specific markers must be probe-induced evidence,
+              // not generic words that occur naturally in benign content.
+              // Old markers triggered FPs on user lists ('root:'),
+              // metadata field names ('uid='), the literal number 49
+              // appearing anywhere in JSON, or NoSQL operators echoed
+              // back from the URL ('$gt' / '$ne').
+              const errorMarkers: Record<string, (string | RegExp)[]> = {
+                'SQLi': ['sql syntax', 'mysql_fetch', 'postgresql', 'sqlite_', 'ora-00', 'ora-01', 'mssql', 'unclosed quotation', 'quoted string not properly terminated', 'syntax error at or near', 'sqlstate['],
                 'XSS': [customPayload, '<script>', 'onerror=', 'onload='],
-                'Path Traversal': ['root:', '/bin/', 'win.ini', '[extensions]', 'etc/passwd'],
-                'RCE': ['uid=', 'gid=', 'root:', 'www-data'],
-                'SSTI': ['49', '7777777', '__class__', 'config'],
-                'SSRF': ['ami-id', 'instance-id', 'computeMetadata'],
-                'NoSQLi': ['$gt', '$ne', 'CastError', 'ObjectId'],
+                'Path Traversal': ['root:x:0:0:', 'daemon:x:', '[fonts]', '[extensions]', '/bin/bash', '/bin/sh', '/sbin/nologin', '[boot loader]'],
+                'RCE': [/\buid=\d+\([\w-]+\)/i, /\bgid=\d+\([\w-]+\)/i, 'root:x:0:0:', 'www-data:x:', /\bbin\/bash\b/, /Linux \S+ \d+\.\d+/],
+                'SSTI': ['>49<', '"value":49', '=49&', ': 49,', ': 49}', '7777777', '__class__', 'mro__', 'subclasses__'],
+                'SSRF': ['ami-id', 'instance-id', 'computeMetadata', 'iam/security-credentials', 'metadata.google.internal'],
+                'NoSQLi': ['CastError', 'ObjectId', 'MongoError:', 'BSON', 'unknown top level operator'],
               };
               
               const typeMarkers = errorMarkers[type] || [];
               const bodyLower = bodyStr.toLowerCase();
-              const hasTypeMarkers = typeMarkers.some(m => bodyLower.includes(m.toLowerCase()));
-              const hasGenericError = bodyLower.includes('error') || bodyLower.includes('exception') || bodyLower.includes('stack trace');
+              const baselineLower = (baseline?.body || '').toLowerCase();
+              const matchMarker = (m: string | RegExp): boolean => {
+                if (m instanceof RegExp) {
+                  return m.test(bodyStr) && !m.test(baseline?.body || '');
+                }
+                const ml = m.toLowerCase();
+                // Marker must be NEW vs baseline — frameworks ship the
+                // word 'config' and the string 'ObjectId' in their JS
+                // bundles; only count it if the probe induced it.
+                return bodyLower.includes(ml) && !baselineLower.includes(ml);
+              };
+              const hasTypeMarkers = typeMarkers.some(matchMarker);
+
+              // Generic error words gated by baseline-diff: 'error' /
+              // 'exception' / 'stack trace' all appear in benign React
+              // bundles and JSON copy. Only count NEW occurrences.
+              const genericErrorRe = /\b(?:error|exception|stack trace|stacktrace|traceback|fatal error)\b/i;
+              const hasGenericError = genericErrorRe.test(bodyStr) && !genericErrorRe.test(baseline?.body || '');
 
               // Verification trigger: need at least one indicator
               if (ai && (isStatusDiff || isLatencySpike || hasTypeMarkers || (hasGenericError && isStatusDiff))) {
@@ -1355,7 +1434,13 @@ export class AutomationEngine {
           { name: 'CRLF injection', value: 'test%0d%0aInjected-Header:%20true', markers: ['Injected-Header', 'injected-header'] },
           { name: 'Unicode normalization', value: '\u{FF0E}\u{FF0E}/\u{FF0E}\u{FF0E}/etc/passwd', markers: ['root:x:0:0:', 'daemon:x:', '/bin/bash'] },
           { name: 'Template expression', value: '${7*7}{{7*7}}<%= 7*7 %>${{7*7}}#{7*7}', markers: ['>49<', '"value":49', '=49&', ': 49,', ': 49}'] },
-          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/hostname">]><foo>&xxe;</foo>', markers: ['root:x:0:0:', 'XML parse error', 'External entity'] },
+          // Target /etc/passwd (deterministic shape) instead of /etc/hostname
+          // (free-form value we couldn't match without knowing it ahead of
+          // time). 'root:x:0:0:' / 'daemon:x:' catch successful external-
+          // entity expansion; 'XML parse error' / 'ParseError' / 'External
+          // entity' catch the parser-error-leak case where the server
+          // failed to disable entities and complained.
+          { name: 'XML entity', value: '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>', markers: ['root:x:0:0:', 'daemon:x:', 'XML parse error', 'External entity', 'ParseError', 'lookupSystemId'] },
           { name: 'GraphQL introspection', value: '{"query":"{__schema{types{name}}}"}', markers: ['__schema', '__type', 'queryType', '"types":[{"name"'] },
           { name: 'Polyglot XSS/SQLi', value: "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e", markers: ['oNcliCk=alert()', 'oNloAd=alert()', '<sVg', 'jaVasCript:'] },
         ];
@@ -1516,8 +1601,16 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
         for (const ep of zerodayTargets.slice(0, 10)) {
           if (diffCount >= 5) break;
           try {
-            const variants = [
-              { name: 'Case variation', url: ep.url.replace(/\/([a-z])/g, (_, c: string) => `/${c.toUpperCase()}`) },
+            // 'Case variation' is intentionally narrow now: most real
+            // servers are case-sensitive on path matching, so an
+            // uppercased URL produces 404 (or completely different
+            // routes) on a benign target — the old `accessEscalation
+            // || (statusDiff && contentDiff)` then flagged the 404
+            // page as a parser differential. We mark it `escalationOnly`
+            // so the ground-truth check below requires a 403 → 200
+            // transition, not just any status difference.
+            const variants: { name: string; url: string; escalationOnly?: boolean }[] = [
+              { name: 'Case variation', url: ep.url.replace(/\/([a-z])/g, (_, c: string) => `/${c.toUpperCase()}`), escalationOnly: true },
               { name: 'Trailing dot', url: ep.url.replace(/(https?:\/\/[^/]+)/, '$1.') },
               { name: 'Double slash', url: ep.url.replace(/(https?:\/\/[^/]+)(\/.*)?$/, '$1/$2') },
               { name: 'Tab in path', url: ep.url.replace(/\/([^/]+)$/, '/\t$1') },
@@ -1539,7 +1632,17 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
                 const accessEscalation = baseRes.status === 403 && varRes.status === 200;
                 const contentDiff = baseBody !== varBody && Math.abs(baseBody.length - varBody.length) > 100;
 
-                if (accessEscalation || (statusDiff && contentDiff)) {
+                // Variants flagged as escalationOnly (e.g. case variation
+                // on case-sensitive servers) require a 403 → 200
+                // transition; bare statusDiff+contentDiff is insufficient
+                // because case-sensitive routes legitimately return
+                // different content for /Foo vs /foo without any
+                // bypass involved.
+                const isHit = variant.escalationOnly
+                  ? accessEscalation
+                  : (accessEscalation || (statusDiff && contentDiff));
+
+                if (isHit) {
                   this.log(jobId, 'vuln', `DIFFERENTIAL ANOMALY [${variant.name}]: ${ep.url}`, {
                     original: { status: baseRes.status, length: baseBody.length },
                     variant: { status: varRes.status, length: varBody.length, url: variant.url },
@@ -2081,15 +2184,23 @@ Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": str
                 }
 
                 if (method === 'OPTIONS' && res.status === 200) {
-                  const allow = res.headers['allow'] || res.headers['access-control-allow-methods'] || '';
-                  if (/PUT|DELETE|PATCH/i.test(allow)) {
-                    const dangerousMethods = allow.split(',').map((m: string) => m.trim()).filter((m: string) => /PUT|DELETE|PATCH/i.test(m));
-                    this.log(jobId, 'vuln', `DANGEROUS METHODS ALLOWED on ${ep.url}: ${dangerousMethods.join(', ')}`);
+                  // Only the RFC 7231 `Allow` header advertises server-level
+                  // method support; `Access-Control-Allow-Methods` is the CORS
+                  // preflight ACK that fires on every modern API that
+                  // legitimately accepts PUT/DELETE for cross-origin SPAs and
+                  // would mass-produce false positives.
+                  const allow = String(res.headers['allow'] || '');
+                  const dangerousMethods = allow
+                    .split(',')
+                    .map((m: string) => m.trim())
+                    .filter((m: string) => /^(PUT|DELETE|PATCH)$/i.test(m));
+                  if (allow && dangerousMethods.length > 0) {
+                    this.log(jobId, 'vuln', `DANGEROUS METHODS ADVERTISED on ${ep.url}: ${dangerousMethods.join(', ')}`);
                     MemoryManager.addFinding(jobId, hostname, {
-                      type: 'Traffic Anomaly', subtype: 'Dangerous methods',
+                      type: 'Traffic Anomaly', subtype: 'Dangerous methods advertised',
                       endpoint: ep.url, methods: dangerousMethods,
-                      gap: `Dangerous HTTP methods allowed: ${dangerousMethods.join(', ')}`,
-                      chain_potential: 'Unauthorized data modification or deletion', severity: 'MEDIUM',
+                      gap: `Server advertises mutating methods (Allow: ${dangerousMethods.join(', ')}) — verify they are not reachable unauthenticated`,
+                      chain_potential: 'Potential unauthorized data modification if not properly authorized', severity: 'LOW',
                     });
                     trafficCount++;
                   }
@@ -2703,12 +2814,26 @@ Return JSON: { "payloads": [{ "name": string, "value": string, "target_waf": str
                 if (implicitRes.status === 302 || implicitRes.status === 200) {
                   const loc = String(implicitRes.headers['location'] || '');
                   const body = typeof implicitRes.data === 'string' ? implicitRes.data : JSON.stringify(implicitRes.data);
-                  if (loc.includes('access_token') || body.includes('access_token')) {
-                    this.log(jobId, 'vuln', `IMPLICIT FLOW ENABLED: ${ep.url}`);
+                  // Implicit flow leaves the access token in the URL
+                  // fragment, e.g. Location: https://app/cb#access_token=<jwt>&token_type=Bearer.
+                  // The bare substring 'access_token' appears in every JS
+                  // bundle that references the OAuth spec, in API
+                  // documentation, in error messages — not a signal. We
+                  // require either a fragment-shaped token (#...access_token=<value>)
+                  // or an actual JSON token value in the body
+                  // ("access_token":"<value>").
+                  const fragmentTokenRe = /#[^\s]*access_token=[A-Za-z0-9._\-]{8,}/;
+                  const jsonTokenRe = /"access_token"\s*:\s*"[A-Za-z0-9._\-]{8,}"/;
+                  const tokenInLocation = fragmentTokenRe.test(loc);
+                  const tokenInBody = jsonTokenRe.test(body);
+                  if (tokenInLocation || tokenInBody) {
+                    this.log(jobId, 'vuln', `IMPLICIT FLOW ENABLED: ${ep.url}`, {
+                      where: tokenInLocation ? 'URL fragment' : 'response body',
+                    });
                     MemoryManager.addFinding(jobId, hostname, {
                       type: 'Auth Vulnerability', subtype: 'Implicit flow enabled',
                       endpoint: ep.url,
-                      gap: 'OAuth implicit flow (response_type=token) is enabled — tokens exposed in URL fragment',
+                      gap: `OAuth implicit flow (response_type=token) is enabled — token returned in ${tokenInLocation ? 'URL fragment' : 'response body'}`,
                       chain_potential: 'Token theft via referrer leak, browser history, or open redirect',
                       severity: 'HIGH',
                     });

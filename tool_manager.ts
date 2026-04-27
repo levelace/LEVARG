@@ -9,22 +9,35 @@ import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 
 const execAsync = promisify(exec);
 
-const spawnAsync = (command: string, args: string[]): Promise<{ stdout: string; stderr: string }> => {
+const spawnAsync = (
+  command: string,
+  args: string[],
+  opts: { timeoutMs?: number; stdin?: string } = {}
+): Promise<{ stdout: string; stderr: string; timedOut?: boolean }> => {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args);
     let stdout = '';
     let stderr = '';
+    let killedByTimeout = false;
+    const timer = opts.timeoutMs && opts.timeoutMs > 0
+      ? setTimeout(() => {
+          killedByTimeout = true;
+          try { child.kill('SIGKILL'); } catch {}
+        }, opts.timeoutMs)
+      : null;
 
-    child.stdout.on('data', (data) => {
-      stdout += data.toString();
-    });
+    child.stdout.on('data', (data) => { stdout += data.toString(); });
+    child.stderr.on('data', (data) => { stderr += data.toString(); });
 
-    child.stderr.on('data', (data) => {
-      stderr += data.toString();
-    });
+    if (opts.stdin) {
+      try { child.stdin.write(opts.stdin); child.stdin.end(); } catch {}
+    }
 
     child.on('close', (code) => {
-      if (code === 0 || code === null) {
+      if (timer) clearTimeout(timer);
+      if (killedByTimeout) {
+        resolve({ stdout, stderr: stderr + `\n[spawnAsync] killed after ${opts.timeoutMs}ms timeout`, timedOut: true });
+      } else if (code === 0 || code === null) {
         resolve({ stdout, stderr });
       } else {
         reject(new Error(`Command failed with exit code ${code}: ${stderr}`));
@@ -32,9 +45,23 @@ const spawnAsync = (command: string, args: string[]): Promise<{ stdout: string; 
     });
 
     child.on('error', (err) => {
+      if (timer) clearTimeout(timer);
       reject(err);
     });
   });
+};
+
+// Per-tool default subprocess timeouts. Tools that hit slow / rate-limited
+// targets must time out so a stuck Phase 2 fingerprint doesn't wedge the
+// entire hunt.
+const TOOL_TIMEOUTS_MS: Record<string, number> = {
+  httpx: 30_000,
+  subfinder: 120_000,
+  naabu: 90_000,
+  nmap: 90_000,
+  katana: 90_000,
+  nuclei: 180_000,
+  pdtm: 60_000,
 };
 
 export type ToolCategory = 'Recon' | 'Fingerprinting' | 'Discovery' | 'Vulnerability' | 'Exploitation' | 'Utility';
@@ -505,14 +532,26 @@ export class ToolManager {
     const status = await this.getToolStatus(toolName);
     const def = TOOL_DEFINITIONS.find(t => t.name === toolName)!;
 
+    const timeoutMs = TOOL_TIMEOUTS_MS[toolName] ?? 60_000;
+
     if (status.method === 'BINARY') {
-      console.log(`[Job ${jobId}] Executing ${toolName} via BINARY`);
-      return await spawnAsync(def.binaryName, args);
-    } 
+      console.log(`[Job ${jobId}] Executing ${toolName} via BINARY (timeout ${timeoutMs}ms)`);
+      const result = await spawnAsync(def.binaryName, args, { timeoutMs });
+      if (result.timedOut && polyfillFn) {
+        console.log(`[Job ${jobId}] ${toolName} timed out — falling back to polyfill`);
+        return await polyfillFn();
+      }
+      return result;
+    }
 
     if (status.method === 'NPX' && def.npxPackage) {
-      console.log(`[Job ${jobId}] Executing ${toolName} via NPX`);
-      return await spawnAsync('npx', ['-y', def.npxPackage, ...args]);
+      console.log(`[Job ${jobId}] Executing ${toolName} via NPX (timeout ${timeoutMs}ms)`);
+      const result = await spawnAsync('npx', ['-y', def.npxPackage, ...args], { timeoutMs });
+      if (result.timedOut && polyfillFn) {
+        console.log(`[Job ${jobId}] ${toolName} (npx) timed out — falling back to polyfill`);
+        return await polyfillFn();
+      }
+      return result;
     }
 
     if (status.method === 'POLYFILL' && polyfillFn) {
