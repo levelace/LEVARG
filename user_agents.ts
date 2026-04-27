@@ -148,3 +148,53 @@ export function getUserAgent(id: string | null | undefined): string | null {
 export function pickRandomBrowserUA(): string {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)].ua;
 }
+
+/**
+ * Default HTTP client identity for Auto-Hunter outbound requests.
+ *
+ * Real Chrome 131 on Linux x86_64 — UA + matching client-hints + the same
+ * Accept / Accept-Language / Accept-Encoding / Sec-Fetch- triple a real
+ * Chrome navigation sends. WAFs that fingerprint on header *shape* (not
+ * just UA) are common; advertising the right UA but missing Sec-Ch-Ua-*
+ * headers is itself a tell. Centralising the identity here keeps every
+ * outbound call site consistent and easy to update when Chrome's stable
+ * channel rolls forward.
+ */
+export const DEFAULT_HTTP_IDENTITY = {
+  userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  acceptLanguage: 'en-US,en;q=0.9',
+  // Node 11.7+ decompresses gzip / deflate / brotli natively via axios; zstd
+  // (Chrome 123+) is omitted because Node lacks runtime support and
+  // advertising it would force the server to send bytes we cannot decode.
+  acceptEncoding: 'gzip, deflate, br',
+  accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+  secChUa: '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+  secChUaMobile: '?0',
+  secChUaPlatform: '"Linux"',
+  secFetchSite: 'none',
+  secFetchMode: 'navigate',
+  secFetchUser: '?1',
+  secFetchDest: 'document',
+  upgradeInsecureRequests: '1',
+} as const;
+
+/**
+ * Header pairs as a flat array of strings — convenient for CLI tools like
+ * httpx / nuclei / katana that take repeated `-H "Name: value"` flags.
+ */
+export function defaultHttpIdentityHeaderArgs(): string[] {
+  const id = DEFAULT_HTTP_IDENTITY;
+  return [
+    '-H', `User-Agent: ${id.userAgent}`,
+    '-H', `Accept-Language: ${id.acceptLanguage}`,
+    '-H', `Accept: ${id.accept}`,
+    '-H', `Sec-Ch-Ua: ${id.secChUa}`,
+    '-H', `Sec-Ch-Ua-Mobile: ${id.secChUaMobile}`,
+    '-H', `Sec-Ch-Ua-Platform: ${id.secChUaPlatform}`,
+    '-H', `Sec-Fetch-Site: ${id.secFetchSite}`,
+    '-H', `Sec-Fetch-Mode: ${id.secFetchMode}`,
+    '-H', `Sec-Fetch-User: ${id.secFetchUser}`,
+    '-H', `Sec-Fetch-Dest: ${id.secFetchDest}`,
+    '-H', `Upgrade-Insecure-Requests: ${id.upgradeInsecureRequests}`,
+  ];
+}

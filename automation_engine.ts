@@ -12,6 +12,7 @@ import { ToolManager } from './tool_manager.js';
 import { MemoryManager } from './memory_manager.js';
 import { SessionVault, SessionScopeError } from './session_vault.js';
 import { AuthFlowVault } from './auth_flow_vault.js';
+import { DEFAULT_HTTP_IDENTITY, defaultHttpIdentityHeaderArgs } from './user_agents.js';
 import * as net from 'net';
 import * as tls from 'tls';
 import { AsyncLocalStorage } from 'async_hooks';
@@ -45,6 +46,44 @@ export interface JobContext {
   refreshing?: Promise<string | null>;
 }
 export const jobContext = new AsyncLocalStorage<JobContext>();
+
+// --- HTTP client fingerprint ---------------------------------------------
+// Auto-Hunter runs over plain axios; without intervention it ships
+// `User-Agent: axios/<version>` and zero client-hints, which Akamai /
+// Cloudflare / Imperva trivially fingerprint as a non-browser. Layer a
+// real Linux Chrome identity (UA + Sec-Ch-Ua family + Accept/Accept-* +
+// Sec-Fetch-* navigation triple) onto every outbound request. Probe-side
+// payloads that intentionally set a header (e.g. UA-based SQLi, header
+// smuggling, security-tool spoofs) are preserved — we never overwrite
+// case-insensitively. Registered BEFORE the session overlay so cookies
+// and bound auth headers still win on collision.
+function applyDefaultIdentity(headers: Record<string, string | undefined>) {
+  const set = (k: string, v: string) => {
+    const existing = Object.keys(headers).find(h => h.toLowerCase() === k.toLowerCase());
+    if (existing && headers[existing] !== undefined && headers[existing] !== '') return;
+    headers[k] = v;
+  };
+  const id = DEFAULT_HTTP_IDENTITY;
+  set('User-Agent', id.userAgent);
+  set('Accept', id.accept);
+  set('Accept-Language', id.acceptLanguage);
+  set('Accept-Encoding', id.acceptEncoding);
+  set('Sec-Ch-Ua', id.secChUa);
+  set('Sec-Ch-Ua-Mobile', id.secChUaMobile);
+  set('Sec-Ch-Ua-Platform', id.secChUaPlatform);
+  set('Sec-Fetch-Site', id.secFetchSite);
+  set('Sec-Fetch-Mode', id.secFetchMode);
+  set('Sec-Fetch-User', id.secFetchUser);
+  set('Sec-Fetch-Dest', id.secFetchDest);
+  set('Upgrade-Insecure-Requests', id.upgradeInsecureRequests);
+}
+
+axios.interceptors.request.use((config) => {
+  const headers = (config.headers ?? {}) as Record<string, string | undefined>;
+  applyDefaultIdentity(headers);
+  (config as { headers: unknown }).headers = headers;
+  return config;
+});
 
 axios.interceptors.request.use((config) => {
   const ctx = jobContext.getStore();
@@ -703,7 +742,13 @@ export class AutomationEngine {
           try {
             const httpxResult = await ToolManager.execute(
               'httpx',
-              ['-u', asset, '-silent', '-json', '-no-color', '-timeout', '8', '-retries', '1', '-tech-detect', '-status-code', '-title'],
+              [
+                '-u', asset,
+                '-silent', '-json', '-no-color',
+                '-timeout', '8', '-retries', '1',
+                '-tech-detect', '-status-code', '-title',
+                ...defaultHttpIdentityHeaderArgs(),
+              ],
               jobId,
               () => ToolManager.polyfillHttpx(asset)
             );
