@@ -618,25 +618,35 @@ export class ToolManager {
   }
 
   /**
-   * HTTP path enumeration polyfill backed by SecLists/Discovery/Web-Content/common.txt.
-   * Returns NDJSON-style stdout (one `{url, status}` per line) so callers can
-   * parse it like a tool output. Wildcard-200 servers return the response
-   * canary in `stderr` for the caller to treat as "skip".
+   * HTTP path enumeration polyfill backed by SecLists common.txt.
+   *
+   * Handles three wildcard patterns:
+   * - **200 wildcard**: every unknown path returns 200 with the same body (classic).
+   * - **302 SPA catch-all**: every unknown path 302-redirects to the same Location
+   *   (React/Vue/Angular SPAs that let the client-side router handle all paths).
+   * - **403 WAF blanket**: every unknown path returns 403 (Akamai/Cloudflare
+   *   blocking by default; no path-specific signal).
    */
   static async polyfillPathEnumeration(origin: string, max = 250) {
     const paths = getCommonPaths(max);
     const concurrency = 20;
     const discovered: { url: string; status: number; bodyLen: number }[] = [];
 
-    let wildcardCanary: string | null = null;
+    // Probe a random path to detect wildcard behavior
+    let wildcardBody: string | null = null;
+    let wildcardRedirect: string | null = null;
+    let wildcardStatus: number | null = null;
     try {
       const probe = await axios.get(
         `${origin}/__levarg_wildcard_${Math.random().toString(36).slice(2, 10)}`,
         { timeout: 4000, validateStatus: () => true, maxRedirects: 0 }
       );
+      wildcardStatus = probe.status;
       if (probe.status === 200) {
         const body = typeof probe.data === 'string' ? probe.data : JSON.stringify(probe.data ?? '');
-        wildcardCanary = body.slice(0, 2000);
+        wildcardBody = body.slice(0, 2000);
+      } else if (probe.status >= 300 && probe.status < 400) {
+        wildcardRedirect = String(probe.headers['location'] || '');
       }
     } catch { /* origin may be unreachable; skip */ }
 
@@ -647,8 +657,21 @@ export class ToolManager {
         try {
           const res = await axios.get(url, { timeout: 4000, validateStatus: () => true, maxRedirects: 0 });
           const body = typeof res.data === 'string' ? res.data : JSON.stringify(res.data ?? '');
+
           if (res.status === 404) return null;
-          if (wildcardCanary && res.status === 200 && body.slice(0, 2000) === wildcardCanary) return null;
+
+          // 200 wildcard: same body as canary
+          if (wildcardBody && res.status === 200 && body.slice(0, 2000) === wildcardBody) return null;
+
+          // SPA catch-all: same redirect target as canary
+          if (wildcardRedirect && res.status >= 300 && res.status < 400) {
+            const loc = String(res.headers['location'] || '');
+            if (loc === wildcardRedirect) return null;
+          }
+
+          // WAF blanket block: canary got the same status with no distinguishing info
+          if (wildcardStatus === res.status && (res.status === 403 || res.status === 401)) return null;
+
           return { url, status: res.status, bodyLen: body.length };
         } catch {
           return null;
@@ -657,8 +680,13 @@ export class ToolManager {
       for (const r of results) if (r) discovered.push(r);
     }
 
+    const warnings: string[] = [];
+    if (wildcardBody) warnings.push('Wildcard 200 detected; canary-filtered.');
+    if (wildcardRedirect) warnings.push(`SPA catch-all detected (302 → ${wildcardRedirect}); redirect-filtered.`);
+    if (wildcardStatus === 403) warnings.push('WAF blanket 403 detected; 403s filtered.');
+
     const ndjson = discovered.map(d => JSON.stringify(d)).join('\n');
-    return { stdout: ndjson, stderr: wildcardCanary ? 'Wildcard 200 detected; canary-filtered.' : '' };
+    return { stdout: ndjson, stderr: warnings.join(' ') };
   }
 
   static async polyfillWhatWeb(url: string) {
