@@ -422,6 +422,11 @@ export class AutomationEngine {
     }
 
     // --- 4a-3: CORS Misconfiguration Audit ---
+    // Real CORS gaps: reflected attacker origin + credentials. ACAO=* on a
+    // public endpoint is by-design (CDN assets, public APIs); flagging it
+    // produced FPs on every static-asset host. Two real-vuln shapes:
+    //   1. ACAO echoes attacker Origin verbatim → trust-boundary leak.
+    //   2. ACAO=null with ACAC=true → null-origin trust (sandboxed iframes).
     this.log(jobId, 'info', `Phase 4a: CORS Misconfiguration Audit for ${asset}`);
     const corsOrigins = [
       `https://evil.com`,
@@ -439,18 +444,22 @@ export class AutomationEngine {
         });
         const acao = res.headers['access-control-allow-origin'];
         const acac = res.headers['access-control-allow-credentials'];
-        if (acao && (acao === origin || acao === '*')) {
-          const isCritical = acac === 'true' && acao !== '*';
-          const severity = isCritical ? 'CRITICAL' : 'MEDIUM';
-          this.log(jobId, 'vuln', `CORS Misconfiguration (${severity}): ${asset} reflects origin ${origin}`, { acao, acac, origin });
-          MemoryManager.addFinding(jobId, hostname, {
-            type: 'CORS Misconfiguration',
-            asset,
-            gap: `Reflects arbitrary origin ${origin} with ${acac === 'true' ? 'credentials' : 'no credentials'}`,
-            chain_potential: isCritical ? 'Full session hijack via cross-origin credential theft' : 'Data leakage via cross-origin reads'
-          });
-          break;
-        }
+        // Drop ACAO=* — CORS spec forbids credentials on wildcard, so it's
+        // only a finding on a path that requires auth. We don't know that
+        // here without a session, so ignore.
+        if (acao !== origin) continue;
+        // Reflected attacker origin. Severity scales with credentials and
+        // null-origin behavior.
+        const credentialed = acac === 'true';
+        const severity = credentialed ? 'CRITICAL' : (origin === 'null' ? 'HIGH' : 'MEDIUM');
+        this.log(jobId, 'vuln', `CORS Misconfiguration (${severity}): ${asset} reflects origin ${origin}`, { acao, acac, origin });
+        MemoryManager.addFinding(jobId, hostname, {
+          type: 'CORS Misconfiguration',
+          asset,
+          gap: `Reflects arbitrary origin ${origin}${credentialed ? ' with credentials' : ''}`,
+          chain_potential: credentialed ? 'Full session hijack via cross-origin credential theft' : 'Data leakage via cross-origin reads'
+        });
+        break;
       } catch {}
     }
 
@@ -491,13 +500,33 @@ export class AutomationEngine {
       }
 
       // --- 4a-5: Session Cookie Security Audit ---
+      // Filter on cookie NAME, not free-text match against the cookie line.
+      // The old `auth|sid|jwt` regex matched value content (e.g. an OAuth
+      // state cookie containing the word "auth" in its base64 payload).
+      // Also exclude cookies that are intentionally readable by JS (CSRF
+      // double-submit tokens) or owned by the WAF/CDN (Akamai bm_*, CF cf_*
+      // — server cannot set HttpOnly on those without breaking JS APIs).
       if (cookies) {
         const cookieIssues: string[] = [];
-        const sessionCookies = cookies.split(/,(?=\s*\w+=)/).filter(c => /session|token|auth|sid|jwt/i.test(c));
-        for (const cookie of sessionCookies) {
-          if (!cookie.toLowerCase().includes('httponly')) cookieIssues.push(`Missing HttpOnly: ${cookie.split('=')[0]}`);
-          if (!cookie.toLowerCase().includes('secure') && asset.startsWith('https')) cookieIssues.push(`Missing Secure flag: ${cookie.split('=')[0]}`);
-          if (!cookie.toLowerCase().includes('samesite')) cookieIssues.push(`Missing SameSite: ${cookie.split('=')[0]}`);
+        const cookieEntries = cookies.split(/,(?=\s*\w+=)/);
+        const isSessionCookieName = (name: string): boolean => {
+          const n = name.toLowerCase();
+          // Known double-submit CSRF tokens: must be JS-readable by design
+          if (n.includes('csrf') || n.includes('xsrf')) return false;
+          // Akamai/Cloudflare bot-manager cookies: vendor-controlled
+          if (/^(bm_|_cf_|cf_|ak_)/i.test(name)) return false;
+          // Analytics: not security-sensitive
+          if (/^(_ga|_gid|_gtm|_fbp|_hjid)/i.test(name)) return false;
+          // True session-cookie name patterns
+          return /^(session|sess|sid|jsessionid|phpsessid|connect\.sid|laravel_session|asp\.?net|fastsessionid|auth_?token|access_?token|refresh_?token|jwt|bearer)/i.test(name);
+        };
+        for (const cookie of cookieEntries) {
+          const name = cookie.split('=')[0].trim();
+          if (!isSessionCookieName(name)) continue;
+          const lc = cookie.toLowerCase();
+          if (!lc.includes('httponly')) cookieIssues.push(`Missing HttpOnly: ${name}`);
+          if (!lc.includes('secure') && asset.startsWith('https')) cookieIssues.push(`Missing Secure flag: ${name}`);
+          if (!lc.includes('samesite')) cookieIssues.push(`Missing SameSite: ${name}`);
         }
         if (cookieIssues.length > 0) {
           this.log(jobId, 'vuln', `SESSION COOKIE ISSUES on ${asset}: ${cookieIssues.length} finding(s)`, { issues: cookieIssues });
@@ -512,21 +541,23 @@ export class AutomationEngine {
     } catch {}
 
     // --- 4a-6: Security Header Audit ---
+    // Don't double-count CSP frame-ancestors as missing X-Frame-Options.
+    // Modern best practice replaces XFO with CSP frame-ancestors; flagging
+    // both produces noise on properly-configured sites.
     this.log(jobId, 'info', `Phase 4a: Security Header Audit for ${asset}`);
     try {
       const res = await axios.get(asset, { timeout: 5000, validateStatus: () => true });
       const headers = res.headers;
       const missingHeaders: string[] = [];
-      
-      const requiredHeaders: Record<string, string> = {
-        'strict-transport-security': 'HSTS',
-        'x-content-type-options': 'X-Content-Type-Options',
-        'x-frame-options': 'X-Frame-Options',
-        'content-security-policy': 'CSP',
-      };
-      for (const [header, label] of Object.entries(requiredHeaders)) {
-        if (!headers[header]) missingHeaders.push(label);
-      }
+
+      const csp = String(headers['content-security-policy'] ?? '');
+      const cspHasFrameAncestors = /frame-ancestors\s+/i.test(csp);
+
+      if (!headers['strict-transport-security'] && asset.startsWith('https')) missingHeaders.push('HSTS');
+      if (!headers['x-content-type-options']) missingHeaders.push('X-Content-Type-Options');
+      if (!headers['x-frame-options'] && !cspHasFrameAncestors) missingHeaders.push('X-Frame-Options');
+      if (!csp) missingHeaders.push('CSP');
+
       if (missingHeaders.length > 0) {
         this.log(jobId, 'warn', `Missing security headers on ${asset}: ${missingHeaders.join(', ')}`);
         MemoryManager.addFinding(jobId, hostname, {
@@ -1042,24 +1073,34 @@ export class AutomationEngine {
             const matchedMarkers = sensitiveContentMarkers.filter(m => bodyStr.includes(m));
             const hasSensitiveContent = matchedMarkers.length > 0;
 
-            // Git config file — verify without AI
-            if (sfUrl.includes('.git/') && res.status === 200 && bodyStr.includes('[core]')) {
+            // Git config — verify body shape: real .git/config is plain
+            // text < 5 KB starting with `[core]`. SPAs returning HTML shells
+            // never match this combination.
+            if (sfUrl.includes('.git/config') && res.status === 200 && bodyStr.length < 5120 && /^\s*\[core\]/.test(bodyStr)) {
               this.log(jobId, 'vuln', `CONFIRMED Git Repository Exposure: ${sfUrl}`);
               MemoryManager.addFinding(jobId, hostname, { type: 'Git Exposure', endpoint: sfUrl, gap: 'Git repository accessible — source code leak', chain_potential: 'Extract credentials, API keys, and source code' });
               sensitiveFileCount++;
               continue;
             }
 
-            // Actuator endpoints — verify without AI
-            if (sfUrl.includes('actuator') && res.status === 200) {
+            // Actuator endpoints — verify body shape, not URL substring.
+            // SPAs return 200 + HTML for any path including /actuator; we
+            // only want the actual Spring Boot Actuator JSON response.
+            const ct = String(res.headers['content-type'] ?? '').toLowerCase();
+            if (sfUrl.includes('actuator') && res.status === 200 && ct.includes('application/json') && /"(status|_links|components|diskSpace|env|beans|configprops)"\s*:/i.test(bodyStr)) {
               this.log(jobId, 'vuln', `CONFIRMED Spring Actuator Exposure: ${sfUrl}`, { preview: bodyStr.substring(0, 300) });
               MemoryManager.addFinding(jobId, hostname, { type: 'Actuator Exposure', endpoint: sfUrl, gap: 'Spring Boot Actuator endpoint exposed', chain_potential: 'Environment variables, beans, and health data leaked' });
               sensitiveFileCount++;
               continue;
             }
 
-            // Swagger/OpenAPI — verify without AI
-            if ((sfUrl.includes('swagger') || sfUrl.includes('api-docs') || sfUrl.includes('openapi')) && res.status === 200 && (bodyStr.includes('swagger') || bodyStr.includes('openapi'))) {
+            // Swagger/OpenAPI — verify body shape:
+            //   - JSON: must contain `"swagger":` or `"openapi":` keys
+            //   - HTML: must be the Swagger UI (`<title>Swagger UI</title>`)
+            // Plain occurrence of the word "swagger" in HTML doesn't qualify.
+            const isSwaggerJson = ct.includes('application/json') && /"(swagger|openapi)"\s*:\s*"\d/.test(bodyStr);
+            const isSwaggerUi = ct.includes('text/html') && /<title>\s*Swagger UI\s*<\/title>/i.test(bodyStr);
+            if ((sfUrl.includes('swagger') || sfUrl.includes('api-docs') || sfUrl.includes('openapi')) && res.status === 200 && (isSwaggerJson || isSwaggerUi)) {
               this.log(jobId, 'vuln', `API Documentation Exposed: ${sfUrl}`, { preview: bodyStr.substring(0, 300) });
               MemoryManager.addFinding(jobId, hostname, { type: 'API Docs Exposure', endpoint: sfUrl, gap: 'Swagger/OpenAPI docs publicly accessible', chain_potential: 'Map all API endpoints for targeted exploitation' });
               sensitiveFileCount++;
