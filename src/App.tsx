@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Shield, Search, FlaskConical, Database, GitBranch, Terminal,
   Activity, LayoutDashboard, Binary, Layers, History, Target,
   Globe, KeyRound, Lock, LogIn, Smartphone, ChevronDown, ChevronRight,
   Compass, Crosshair, Beaker, Wrench, Archive, UserCheck,
+  Menu, X,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -146,8 +147,21 @@ const CyberBackground = () => {
   );
 };
 
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+  return isMobile;
+}
+
 export default function App() {
   const [activeView, setActiveView] = useState<View>('dashboard');
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isMobile = useIsMobile();
   const [openSections, setOpenSections] = useState<Record<string, boolean>>({
     overview: true,
     targeting: true,
@@ -159,6 +173,11 @@ export default function App() {
   const [repeaterTarget, setRepeaterTarget] = useState<unknown>(null);
   const [fuzzerTarget, setFuzzerTarget] = useState<string>('');
   const [encoderTarget, setEncoderTarget] = useState<string>('');
+
+  const handleNavSelect = useCallback((view: View) => {
+    setActiveView(view);
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
 
   // Auto-expand the section containing the active view.
   useEffect(() => {
@@ -183,20 +202,47 @@ export default function App() {
     <div className="flex h-screen bg-transparent text-zinc-300 font-sans selection:bg-emerald-500/30 selection:text-emerald-200 relative">
       <CyberBackground />
 
-      {/* Sidebar */}
-      <aside className="w-64 border-r border-emerald-900/30 flex flex-col bg-black/40 backdrop-blur-md z-10 shadow-[4px_0_24px_rgba(16,185,129,0.05)]">
-        <div className="p-6 border-b border-emerald-900/30 relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/50 to-transparent" />
-          <h1 className="text-2xl font-bold tracking-tighter flex items-center gap-2 text-emerald-50 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]">
-            <Terminal className="w-6 h-6 text-emerald-400" />
-            LEVARG
-          </h1>
-          <p className="text-[10px] uppercase tracking-widest text-emerald-500/70 mt-1 font-mono">
-            Cyber Lab Engine
-          </p>
+      {/* Mobile overlay */}
+      {isMobile && sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-30 backdrop-blur-sm"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      {/* Sidebar — fixed drawer on mobile, static on desktop */}
+      <aside
+        className={cn(
+          'border-r border-emerald-900/30 flex flex-col bg-black/90 md:bg-black/40 backdrop-blur-md shadow-[4px_0_24px_rgba(16,185,129,0.05)]',
+          'transition-transform duration-300 ease-in-out',
+          isMobile
+            ? 'fixed inset-y-0 left-0 w-72 z-40 pt-[env(safe-area-inset-top)]'
+            : 'w-64 z-10 relative',
+          isMobile && !sidebarOpen && '-translate-x-full',
+        )}
+      >
+        <div className="p-4 md:p-6 border-b border-emerald-900/30 relative overflow-hidden flex items-center justify-between">
+          <div>
+            <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/50 to-transparent" />
+            <h1 className="text-xl md:text-2xl font-bold tracking-tighter flex items-center gap-2 text-emerald-50 drop-shadow-[0_0_8px_rgba(16,185,129,0.5)]">
+              <Terminal className="w-5 h-5 md:w-6 md:h-6 text-emerald-400" />
+              LEVARG
+            </h1>
+            <p className="text-[10px] uppercase tracking-widest text-emerald-500/70 mt-1 font-mono">
+              Cyber Lab Engine
+            </p>
+          </div>
+          {isMobile && (
+            <button
+              onClick={() => setSidebarOpen(false)}
+              className="p-2 rounded-lg text-emerald-400 hover:bg-emerald-900/30 active:bg-emerald-900/50 min-w-[44px] min-h-[44px] flex items-center justify-center"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-3 overflow-y-auto scrollbar-hide">
+        <nav className="flex-1 px-3 py-3 md:py-4 space-y-2 md:space-y-3 overflow-y-auto scrollbar-hide">
           {NAV_SECTIONS.map((section) => {
             const SectionIcon = section.icon;
             const isOpen = openSections[section.id];
@@ -206,18 +252,18 @@ export default function App() {
                 <button
                   onClick={() => toggleSection(section.id)}
                   className={cn(
-                    'w-full flex items-center gap-2 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] font-mono rounded transition-colors',
+                    'w-full flex items-center gap-2 px-2 py-2.5 md:py-1.5 text-[11px] md:text-[10px] uppercase tracking-[0.18em] font-mono rounded transition-colors min-h-[44px] md:min-h-0',
                     containsActive
                       ? 'text-emerald-300'
                       : 'text-emerald-500/60 hover:text-emerald-300',
                   )}
                 >
-                  <SectionIcon className="w-3 h-3" />
+                  <SectionIcon className="w-4 h-4 md:w-3 md:h-3" />
                   <span className="flex-1 text-left">{section.label}</span>
                   {isOpen ? (
-                    <ChevronDown className="w-3 h-3 opacity-70" />
+                    <ChevronDown className="w-4 h-4 md:w-3 md:h-3 opacity-70" />
                   ) : (
-                    <ChevronRight className="w-3 h-3 opacity-70" />
+                    <ChevronRight className="w-4 h-4 md:w-3 md:h-3 opacity-70" />
                   )}
                 </button>
                 <AnimatePresence initial={false}>
@@ -237,9 +283,9 @@ export default function App() {
                           return (
                             <button
                               key={item.id}
-                              onClick={() => setActiveView(item.id)}
+                              onClick={() => handleNavSelect(item.id)}
                               className={cn(
-                                'w-full flex items-center gap-2 px-2 py-1.5 text-xs transition-all rounded relative overflow-hidden',
+                                'w-full flex items-center gap-3 md:gap-2 px-3 md:px-2 py-3 md:py-1.5 text-xs transition-all rounded relative overflow-hidden min-h-[44px] md:min-h-0 active:scale-[0.98]',
                                 isActive
                                   ? 'bg-emerald-500/15 text-emerald-300 shadow-[inset_0_0_12px_rgba(16,185,129,0.1)] border border-emerald-500/25'
                                   : 'hover:bg-emerald-900/20 text-zinc-400 hover:text-emerald-100 border border-transparent',
@@ -247,13 +293,13 @@ export default function App() {
                             >
                               <Icon
                                 className={cn(
-                                  'w-3.5 h-3.5 shrink-0',
+                                  'w-4.5 h-4.5 md:w-3.5 md:h-3.5 shrink-0',
                                   isActive
                                     ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.8)]'
                                     : 'text-zinc-500',
                                 )}
                               />
-                              <span className="font-mono uppercase tracking-wider text-[11px] truncate">
+                              <span className="font-mono uppercase tracking-wider text-xs md:text-[11px] truncate">
                                 {item.label}
                               </span>
                               {isActive && (
@@ -274,7 +320,7 @@ export default function App() {
           })}
         </nav>
 
-        <div className="p-4 border-t border-emerald-900/30 bg-black/20">
+        <div className="p-3 md:p-4 border-t border-emerald-900/30 bg-black/20" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
           <div className="flex items-center gap-3 px-3 py-2 rounded-md bg-emerald-950/30 border border-emerald-900/50">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
             <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-400/90">System Online</span>
@@ -284,9 +330,17 @@ export default function App() {
       </aside>
 
       {/* Main Content */}
-      <main className="flex-1 overflow-hidden bg-transparent relative flex flex-col z-10">
-        {/* Breadcrumb header */}
-        <div className="px-4 pt-3 pb-1 flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-emerald-500/70">
+      <main className="flex-1 overflow-hidden bg-transparent relative flex flex-col z-10 min-w-0">
+        {/* Mobile header + Breadcrumb */}
+        <div className="px-3 md:px-4 pt-2 md:pt-3 pb-1 flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-emerald-500/70" style={{ paddingTop: 'max(0.5rem, env(safe-area-inset-top))' }}>
+          {isMobile && (
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="p-2 -ml-1 rounded-lg text-emerald-400 hover:bg-emerald-900/30 active:bg-emerald-900/50 min-w-[44px] min-h-[44px] flex items-center justify-center mr-1"
+            >
+              <Menu className="w-5 h-5" />
+            </button>
+          )}
           <span>{breadcrumb.sectionLabel}</span>
           <ChevronRight className="w-3 h-3 opacity-60" />
           <span className="text-emerald-300">{breadcrumb.itemLabel}</span>
@@ -299,7 +353,7 @@ export default function App() {
             animate={{ opacity: 1, scale: 1, filter: 'blur(0px)' }}
             exit={{ opacity: 0, scale: 1.02, filter: 'blur(4px)' }}
             transition={{ duration: 0.25, ease: 'easeOut' }}
-            className="h-full flex flex-col overflow-hidden p-2"
+            className="h-full flex flex-col overflow-hidden p-1.5 md:p-2"
           >
             <div className="h-full bg-black/60 backdrop-blur-xl border border-emerald-900/30 rounded-xl overflow-hidden shadow-[0_8px_32px_rgba(0,0,0,0.5)] relative">
               <div className="absolute inset-0 pointer-events-none bg-[linear-gradient(rgba(16,185,129,0.03)_1px,transparent_1px)] bg-[size:100%_4px] z-50 opacity-50" />

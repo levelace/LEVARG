@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup rules for Android 11 and below -->
+<full-backup-content>
+    <include domain="database" path="." />
+    <exclude domain="cache" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>
