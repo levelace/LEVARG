@@ -118,10 +118,14 @@ export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
 # Install nvm if not present
 if [[ ! -d "$NVM_DIR" ]] || [[ ! -s "$NVM_DIR/nvm.sh" ]]; then
   info "Installing nvm..."
-  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash || {
+  NVM_INSTALL="/tmp/nvm_install_$$.sh"
+  if curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh -o "$NVM_INSTALL"; then
+    bash "$NVM_INSTALL" || { fail "nvm install script failed"; ((ERRORS++)); }
+    rm -f "$NVM_INSTALL"
+  else
     fail "nvm download failed"
     ((ERRORS++))
-  }
+  fi
 fi
 
 # Source nvm — it's a shell function, not a binary
@@ -233,9 +237,12 @@ if ! need ollama; then
   if $IS_WSL; then
     # WSL often lacks systemd — the install script may fail on the service step.
     # Try the script first; if it fails, fall back to a manual binary install.
-    if curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null; then
+    OLLAMA_INSTALL="/tmp/ollama_install_$$.sh"
+    if curl -fsSL https://ollama.com/install.sh -o "$OLLAMA_INSTALL" 2>/dev/null && sh "$OLLAMA_INSTALL" 2>/dev/null; then
+      rm -f "$OLLAMA_INSTALL"
       ok "Ollama installed"
     else
+      rm -f "$OLLAMA_INSTALL"
       warn "Ollama install script failed (common on WSL without systemd)"
       info "  Trying manual binary install..."
       case "$ARCH" in
@@ -262,9 +269,12 @@ if ! need ollama; then
     fi
   else
     # Native Linux / macOS
-    if curl -fsSL https://ollama.com/install.sh | sh 2>/dev/null; then
+    OLLAMA_INSTALL="/tmp/ollama_install_$$.sh"
+    if curl -fsSL https://ollama.com/install.sh -o "$OLLAMA_INSTALL" 2>/dev/null && sh "$OLLAMA_INSTALL" 2>/dev/null; then
+      rm -f "$OLLAMA_INSTALL"
       ok "Ollama installed"
     else
+      rm -f "$OLLAMA_INSTALL"
       warn "Ollama install failed — AI features will be unavailable"
       warn "  You can install later: https://ollama.com/download"
       ((ERRORS++))
