@@ -8,3 +8,4 @@ coverage/
 !.env.example
 .browser_profiles/
 pocforge.db
+release/
