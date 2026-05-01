@@ -9,8 +9,31 @@
 }
 
 @layer base {
+  /* Mobile-first: safe area insets, touch behavior, no overscroll */
+  html {
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+
   body {
     @apply bg-[#050505] text-zinc-300;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: none;
+  }
+
+  /* Prevent text selection on interactive elements */
+  button, a, [role="button"] {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Ensure inputs are large enough on mobile */
+  @media (max-width: 767px) {
+    input, select, textarea {
+      font-size: 16px !important; /* prevents iOS zoom on focus */
+    }
   }
 
   /* Custom Scrollbar */
@@ -59,11 +82,13 @@
   }
 
   .cyber-button {
-    @apply bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-6 py-2 text-xs font-mono uppercase tracking-widest flex items-center gap-2 transition-all disabled:opacity-50 rounded-md relative overflow-hidden;
+    @apply bg-emerald-500/10 border border-emerald-500/50 text-emerald-400 px-4 md:px-6 py-3 md:py-2 text-xs font-mono uppercase tracking-widest flex items-center gap-2 transition-all disabled:opacity-50 rounded-md relative overflow-hidden;
+    min-height: 44px;
   }
 
   .cyber-input {
-    @apply bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-2 text-sm font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all placeholder:text-emerald-900/50;
+    @apply bg-black/50 border border-emerald-900/50 text-emerald-100 px-4 py-3 md:py-2 text-sm font-mono focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 rounded-md transition-all placeholder:text-emerald-900/50;
+    min-height: 44px;
   }
   .scrollbar-hide::-webkit-scrollbar {
     display: none;

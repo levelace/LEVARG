@@ -9,3 +9,4 @@ coverage/
 .browser_profiles/
 pocforge.db
 release/
+static/nodejs/server.js

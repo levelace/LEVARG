@@ -1,0 +1,5 @@
+{
+  "name": "levarg-nodejs-mobile",
+  "version": "1.0.0",
+  "main": "./server.js"
+}
