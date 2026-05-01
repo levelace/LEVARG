@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 
-const db = new Database('pocforge.db');
+const dataDir = process.env.LEVARG_DATA_DIR || process.cwd();
+const db = new Database(path.join(dataDir, 'pocforge.db'));
 
 // Initialize schema
 db.exec(`

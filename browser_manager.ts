@@ -34,7 +34,7 @@ import { SessionVault, type SessionCookie, type SessionStorage } from './session
 puppeteer.use(StealthPlugin());
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PROFILE_ROOT = path.join(__dirname, '.browser_profiles');
+const PROFILE_ROOT = path.join(process.env.LEVARG_DATA_DIR || __dirname, '.browser_profiles');
 
 interface ScopeRow {
   id: string;
