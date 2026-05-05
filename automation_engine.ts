@@ -21,8 +21,19 @@ import { AsyncLocalStorage } from 'async_hooks';
 // Configure stealth
 puppeteer.use(StealthPlugin());
 
-// Configure axios retry
-axiosRetry(axios, { retries: 3, retryDelay: axiosRetry.exponentialDelay });
+// Scoped axios instance for recon/discovery probes that benefit from retries.
+// The global axios instance is NOT retried — lab proxy, scan runner, and AI
+// client use it directly and should not triple traffic on 404s.
+const reconAxios = axios.create();
+axiosRetry(reconAxios, {
+  retries: 2,
+  retryDelay: axiosRetry.exponentialDelay,
+  retryCondition: (error) => {
+    // Only retry on network errors and 5xx, never on 4xx
+    return axiosRetry.isNetworkOrIdempotentRequestError(error) ||
+      (error.response?.status !== undefined && error.response.status >= 500);
+  },
+});
 
 // --- Per-job session propagation -----------------------------------------
 // AsyncLocalStorage carries the active sessionId for the duration of one
