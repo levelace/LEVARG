@@ -6,6 +6,8 @@ import cors from 'cors';
 import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { createServer as createViteServer } from 'vite';
+import { execSync } from 'child_process';
+import { readFileSync } from 'fs';
 import db from './db.js';
 import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 import { AutomationEngine } from './automation_engine.js';
@@ -1393,6 +1395,160 @@ async function startServer() {
     if (!url) return res.status(400).json({ error: 'url is required' });
     const matched = EndpointHeaders.matchUrl(url, scopeId);
     res.json(matched);
+  });
+
+  // --- Upgrade / About API ---
+  const getLocalVersion = (): string => {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
+      return pkg.version || '0.0.0';
+    } catch {
+      return '0.0.0';
+    }
+  };
+
+  const getGitInfo = (): { branch: string; commit: string; commitDate: string } => {
+    try {
+      const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: process.cwd() }).toString().trim();
+      const commit = execSync('git rev-parse --short HEAD', { cwd: process.cwd() }).toString().trim();
+      const commitDate = execSync('git log -1 --format=%ci', { cwd: process.cwd() }).toString().trim();
+      return { branch, commit, commitDate };
+    } catch {
+      return { branch: 'unknown', commit: 'unknown', commitDate: '' };
+    }
+  };
+
+  app.get('/api/version', (_req, res) => {
+    const version = getLocalVersion();
+    const git = getGitInfo();
+    const uptime = process.uptime();
+    res.json({
+      version,
+      branch: git.branch,
+      commit: git.commit,
+      commitDate: git.commitDate,
+      nodeVersion: process.version,
+      platform: process.platform,
+      uptime: Math.floor(uptime),
+      pid: process.pid,
+    });
+  });
+
+  app.get('/api/upgrade/check', async (_req, res) => {
+    try {
+      const localVersion = getLocalVersion();
+      const git = getGitInfo();
+      const localCommit = execSync('git rev-parse HEAD', { cwd: process.cwd() }).toString().trim();
+
+      // Fetch latest from remote
+      try {
+        execSync('git fetch origin --quiet', { cwd: process.cwd(), timeout: 30_000 });
+      } catch {
+        return res.status(502).json({ error: 'Could not reach remote — check your network connection.' });
+      }
+
+      // Determine remote ref: try current branch, fall back to main/master
+      let remoteBranch = git.branch;
+      let remoteCommit: string;
+      try {
+        remoteCommit = execSync(`git rev-parse origin/${remoteBranch}`, { cwd: process.cwd() }).toString().trim();
+      } catch {
+        // Current branch has no remote tracking — try main, then master
+        for (const fallback of ['main', 'master']) {
+          try {
+            remoteCommit = execSync(`git rev-parse origin/${fallback}`, { cwd: process.cwd() }).toString().trim();
+            remoteBranch = fallback;
+            break;
+          } catch { /* continue */ }
+        }
+        if (!remoteCommit!) {
+          return res.json({
+            currentVersion: localVersion,
+            latestVersion: localVersion,
+            currentCommit: localCommit.slice(0, 7),
+            latestCommit: localCommit.slice(0, 7),
+            behind: 0,
+            updateAvailable: false,
+            branch: git.branch,
+            changelog: [],
+          });
+        }
+      }
+
+      const behind = parseInt(
+        execSync(`git rev-list --count HEAD..origin/${remoteBranch}`, { cwd: process.cwd() }).toString().trim(),
+        10,
+      );
+
+      let remoteVersion = localVersion;
+      if (behind > 0) {
+        try {
+          const remotePkg = execSync(`git show origin/${remoteBranch}:package.json`, { cwd: process.cwd() }).toString();
+          remoteVersion = JSON.parse(remotePkg).version || localVersion;
+        } catch { /* keep local */ }
+      }
+
+      const changelog: string[] = [];
+      if (behind > 0) {
+        const log = execSync(
+          `git log --oneline HEAD..origin/${remoteBranch}`,
+          { cwd: process.cwd() },
+        ).toString().trim();
+        if (log) changelog.push(...log.split('\n'));
+      }
+
+      res.json({
+        currentVersion: localVersion,
+        latestVersion: remoteVersion,
+        currentCommit: localCommit.slice(0, 7),
+        latestCommit: remoteCommit.slice(0, 7),
+        behind,
+        updateAvailable: behind > 0,
+        branch: git.branch,
+        changelog,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/upgrade/apply', async (_req, res) => {
+    try {
+      const git = getGitInfo();
+
+      // Pull latest changes
+      const pullOutput = execSync(`git pull origin ${git.branch}`, {
+        cwd: process.cwd(),
+        timeout: 60_000,
+      }).toString().trim();
+
+      // Install any new/changed dependencies
+      const installOutput = execSync('npm install --production=false', {
+        cwd: process.cwd(),
+        timeout: 120_000,
+      }).toString().trim();
+
+      const newVersion = getLocalVersion();
+      const newGit = getGitInfo();
+
+      // Respond with success before restarting
+      res.json({
+        success: true,
+        version: newVersion,
+        commit: newGit.commit,
+        pullOutput,
+        installOutput: installOutput.slice(-500),
+        restarting: true,
+      });
+
+      // Schedule restart after response is sent
+      setTimeout(() => {
+        console.log('[Upgrade] Restarting process...');
+        process.exit(0);
+      }, 1500);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message, success: false });
+    }
   });
 
   // --- Static Files & Vite Middleware ---

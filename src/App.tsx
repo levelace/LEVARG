@@ -4,7 +4,7 @@ import {
   Activity, LayoutDashboard, Binary, Layers, History, Target,
   Globe, KeyRound, Lock, LogIn, Smartphone, ChevronDown, ChevronRight,
   Compass, Crosshair, Beaker, Wrench, Archive, UserCheck,
-  Menu, X,
+  Menu, X, Info,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -29,6 +29,7 @@ import CredentialsPanel from './components/CredentialsPanel';
 import AuthFlowsPanel from './components/AuthFlowsPanel';
 import OSBrowserPairPanel from './components/OSBrowserPairPanel';
 import IdentityDashboard from './components/IdentityDashboard';
+import About from './components/About';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -40,7 +41,8 @@ type View =
   | 'identity' | 'browser' | 'sessions' | 'credentials' | 'authflows' | 'osbridge'
   | 'automation' | 'lab' | 'scanner' | 'stackgap' | 'flows'
   | 'encoder' | 'payloads'
-  | 'history';
+  | 'history'
+  | 'about';
 
 interface NavItem { id: View; label: string; icon: React.ComponentType<{ className?: string }>; }
 interface NavSection { id: string; label: string; icon: React.ComponentType<{ className?: string }>; items: NavItem[]; }
@@ -107,6 +109,14 @@ const NAV_SECTIONS: NavSection[] = [
       { id: 'history', label: 'HTTP History', icon: History },
     ],
   },
+  {
+    id: 'system',
+    label: 'System',
+    icon: Info,
+    items: [
+      { id: 'about', label: 'About', icon: Info },
+    ],
+  },
 ];
 
 const sectionFor = (view: View): string =>
@@ -169,6 +179,7 @@ export default function App() {
     testing: true,
     tooling: false,
     records: false,
+    system: false,
   });
   const [repeaterTarget, setRepeaterTarget] = useState<unknown>(null);
   const [fuzzerTarget, setFuzzerTarget] = useState<string>('');
@@ -323,8 +334,13 @@ export default function App() {
         <div className="p-3 md:p-4 border-t border-emerald-900/30 bg-black/20" style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
           <div className="flex items-center gap-3 px-3 py-2 rounded-md bg-emerald-950/30 border border-emerald-900/50">
             <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.8)]" />
-            <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-400/90">System Online</span>
-            <div className="ml-auto text-[9px] font-mono text-emerald-500/50">v1.0.0</div>
+            <button
+              onClick={() => handleNavSelect('about')}
+              className="flex-1 flex items-center justify-between hover:text-emerald-300 transition-colors cursor-pointer bg-transparent border-none p-0"
+            >
+              <span className="text-[10px] font-mono uppercase tracking-wider text-emerald-400/90">System Online</span>
+              <span className="text-[9px] font-mono text-emerald-500/50 hover:text-emerald-400 transition-colors">v1.0.0</span>
+            </button>
           </div>
         </div>
       </aside>
@@ -390,6 +406,8 @@ export default function App() {
               {activeView === 'payloads' && <PayloadManager />}
 
               {activeView === 'history' && <HttpHistory />}
+
+              {activeView === 'about' && <About />}
             </div>
           </motion.div>
         </AnimatePresence>
