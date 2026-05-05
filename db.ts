@@ -200,4 +200,22 @@ if (!hasPhase) {
   db.exec("ALTER TABLE automation_jobs ADD COLUMN phase TEXT");
 }
 
+// --- Performance indexes ---
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_responses_request_id ON responses(request_id);
+  CREATE INDEX IF NOT EXISTS idx_scan_results_scan_id ON scan_results(scan_id);
+  CREATE INDEX IF NOT EXISTS idx_automation_logs_job_id ON automation_logs(job_id);
+  CREATE INDEX IF NOT EXISTS idx_endpoints_created ON endpoints(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_scope_id ON sessions(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_credentials_scope_id ON credentials(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_auth_flows_scope_id ON auth_flows(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_extension_tokens_scope_id ON extension_tokens(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_stack_gap_findings_created ON stack_gap_findings(created_at DESC);
+`);
+
+// --- Crash recovery: mark orphaned 'running' scans/jobs as 'failed' ---
+db.prepare("UPDATE scans SET status = 'failed' WHERE status = 'running'").run();
+db.prepare("UPDATE automation_jobs SET status = 'failed' WHERE status = 'running'").run();
+
 export default db;

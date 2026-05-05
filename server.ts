@@ -20,6 +20,9 @@ import { AuthFlowVault, type AuthFlowStep, type TriggerMode } from './auth_flow_
 import { ExtensionTokenVault } from './extension_token_vault.js';
 import { detectLoginForm } from './form_detector.js';
 import { USER_AGENTS, getUserAgent, pickRandomBrowserUA } from './user_agents.js';
+import { WafBypassEngine } from './waf_bypass_engine.js';
+import { OriginIpDetector } from './origin_ip_detector.js';
+import { EndpointHeaders } from './endpoint_headers.js';
 
 async function startServer() {
   // Auto-install, start, and pull model for Ollama (runs in background)
@@ -28,10 +31,34 @@ async function startServer() {
   });
 
   const app = express();
-  const PORT = 3000;
+  const PORT = parseInt(process.env.LEVARG_PORT || '3000', 10);
+  const BIND_HOST = process.env.LEVARG_BIND || '127.0.0.1';
+  const API_KEY = process.env.LEVARG_API_KEY || '';
 
-  app.use(cors());
-  app.use(express.json());
+  // CORS: restrict to same-origin by default; allow explicit origins via env
+  const allowedOrigins = process.env.LEVARG_CORS_ORIGINS
+    ? process.env.LEVARG_CORS_ORIGINS.split(',')
+    : [`http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`];
+  app.use(cors({
+    origin: (origin, cb) => {
+      // Allow requests with no origin (curl, server-to-server, same-origin)
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      cb(new Error('CORS: origin not allowed'));
+    },
+  }));
+  app.use(express.json({ limit: '2mb' }));
+
+  // Optional API-key gate for non-localhost access
+  if (API_KEY) {
+    app.use('/api', (req, res, next) => {
+      const provided = req.headers['x-api-key'] || req.query.apiKey;
+      if (provided === API_KEY) return next();
+      // Always allow localhost without key
+      const ip = req.ip || req.socket.remoteAddress || '';
+      if (ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1') return next();
+      res.status(401).json({ error: 'Invalid or missing API key' });
+    });
+  }
 
   // Request logging middleware
   app.use((req, res, next) => {
@@ -72,14 +99,21 @@ async function startServer() {
 
     try {
       // Normalize domain to hostname
-      domain = domain.trim();
+      domain = domain.trim().toLowerCase();
       if (domain.startsWith('http://') || domain.startsWith('https://')) {
         try {
           domain = new URL(domain).hostname;
         } catch (e) {}
       } else {
-        // Strip out paths and ports if user pastes examples like example.com/path or example.com:8080
         domain = domain.split('/')[0].split(':')[0];
+      }
+      // Strip trailing dots (DNS root)
+      domain = domain.replace(/\.+$/, '');
+      // Strip leading wildcard prefix
+      domain = domain.replace(/^\*\./, '');
+      // Guard against TLD-only or single-label scopes
+      if (!domain || !domain.includes('.')) {
+        return res.status(400).json({ error: 'Domain must have at least two labels (e.g. example.com)' });
       }
 
       const id = uuidv4();
@@ -101,7 +135,9 @@ async function startServer() {
 
   // Recon Engine
   app.get('/api/endpoints', (req, res) => {
-    const endpoints = db.prepare('SELECT * FROM endpoints ORDER BY created_at DESC').all();
+    const limit = Math.min(parseInt(String(req.query.limit || '500'), 10) || 500, 5000);
+    const offset = parseInt(String(req.query.offset || '0'), 10) || 0;
+    const endpoints = db.prepare('SELECT * FROM endpoints ORDER BY created_at DESC LIMIT ? OFFSET ?').all(limit, offset);
     res.json(endpoints);
   });
 
@@ -116,15 +152,24 @@ async function startServer() {
   });
 
   app.post('/api/endpoints/import', (req, res) => {
-    const { endpoints } = req.body; // Array of { url, method, source }
+    const { endpoints } = req.body;
+    if (!Array.isArray(endpoints)) {
+      return res.status(400).json({ error: 'endpoints must be an array' });
+    }
+    const valid = endpoints.filter(
+      (e: unknown) => e && typeof e === 'object' && typeof (e as Record<string, unknown>).url === 'string',
+    );
+    if (valid.length === 0) {
+      return res.status(400).json({ error: 'No valid endpoints provided (each must have a url string)' });
+    }
     const insert = db.prepare('INSERT OR IGNORE INTO endpoints (id, url, method, source) VALUES (?, ?, ?, ?)');
-    const transaction = db.transaction((items) => {
+    const transaction = db.transaction((items: { url: string; method?: string; source?: string }[]) => {
       for (const item of items) {
         insert.run(uuidv4(), item.url, item.method || 'GET', item.source || 'manual');
       }
     });
-    transaction(endpoints);
-    res.json({ success: true, count: endpoints.length });
+    transaction(valid);
+    res.json({ success: true, count: valid.length });
   });
 
   // Request Laboratory
@@ -171,6 +216,8 @@ async function startServer() {
           throw err;
         }
       }
+      // Layer per-endpoint custom headers (won't overwrite explicit headers)
+      finalHeaders = EndpointHeaders.mergeHeaders(url, finalHeaders);
 
       const startTime = Date.now();
       const response = await axios({
@@ -207,7 +254,9 @@ async function startServer() {
 
   // Payloads
   app.get('/api/payloads', (req, res) => {
-    const payloads = db.prepare('SELECT * FROM payloads ORDER BY created_at DESC').all();
+    const limit = Math.min(parseInt(String(req.query.limit || '500'), 10) || 500, 5000);
+    const offset = parseInt(String(req.query.offset || '0'), 10) || 0;
+    const payloads = db.prepare('SELECT * FROM payloads ORDER BY created_at DESC LIMIT ? OFFSET ?').all(limit, offset);
     res.json(payloads);
   });
 
@@ -232,6 +281,9 @@ async function startServer() {
 
   app.post('/api/payloads', (req, res) => {
     const { name, content, type } = req.body;
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+    if (!content || typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
+    if (!type || typeof type !== 'string') return res.status(400).json({ error: 'type is required' });
     const id = uuidv4();
     db.prepare('INSERT INTO payloads (id, name, content, type) VALUES (?, ?, ?, ?)').run(id, name, content, type);
     res.json({ id, name, content, type });
@@ -257,12 +309,16 @@ async function startServer() {
 
   // Flows
   app.get('/api/flows', (req, res) => {
-    const flows = db.prepare('SELECT * FROM flows ORDER BY created_at DESC').all();
+    const limit = Math.min(parseInt(String(req.query.limit || '500'), 10) || 500, 5000);
+    const offset = parseInt(String(req.query.offset || '0'), 10) || 0;
+    const flows = db.prepare('SELECT * FROM flows ORDER BY created_at DESC LIMIT ? OFFSET ?').all(limit, offset);
     res.json(flows.map((f: any) => ({ ...f, steps: JSON.parse(f.steps) })));
   });
 
   app.post('/api/flows', (req, res) => {
     const { name, steps } = req.body;
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+    if (!Array.isArray(steps)) return res.status(400).json({ error: 'steps must be an array' });
     const id = uuidv4();
     db.prepare('INSERT INTO flows (id, name, steps) VALUES (?, ?, ?)').run(id, name, JSON.stringify(steps));
     res.json({ id, name, steps });
@@ -747,6 +803,21 @@ async function startServer() {
     if (!token || !ingestUrl) {
       return res.status(400).json({ error: 'token and ingestUrl are required' });
     }
+    // Validate ingestUrl points to a known self-origin to prevent exfiltration
+    try {
+      const parsed = new URL(ingestUrl);
+      const selfOrigins = [
+        `http://localhost:${PORT}`, `http://127.0.0.1:${PORT}`,
+        `http://${BIND_HOST}:${PORT}`,
+        ...(process.env.APP_URL ? [process.env.APP_URL] : []),
+      ];
+      const ingestOrigin = parsed.origin;
+      if (!selfOrigins.some(o => ingestOrigin === o || ingestOrigin === new URL(o).origin)) {
+        return res.status(400).json({ error: 'ingestUrl must point to this LEVARG instance' });
+      }
+    } catch {
+      return res.status(400).json({ error: 'ingestUrl is not a valid URL' });
+    }
     const ingestUrlJson = JSON.stringify(ingestUrl);
     const tokenJson = JSON.stringify(token);
     // Built as a single-line javascript: URL. fetch() the ingest endpoint
@@ -911,8 +982,8 @@ async function startServer() {
 
     res.json({ id: scanId, status: 'started' });
 
-    // Run async worker
-    setTimeout(async () => {
+    // Run async worker with crash-safe status management
+    const runScan = async () => {
       try {
         const payloadSet = db.prepare('SELECT content FROM payloads WHERE id = ?').get(payloadSetId) as any;
         if (!payloadSet) throw new Error('Payload set not found');
@@ -931,43 +1002,54 @@ async function startServer() {
 
         db.prepare('UPDATE scans SET baseline_status = ?, baseline_length = ? WHERE id = ?').run(baselineStatus, baselineLength, scanId);
 
-        for (const payload of payloads) {
-          const pUrl = targetUrl.replace('§FUZZ§', encodeURIComponent(payload));
-          const pBody = typeof body === 'string' ? body.replace('§FUZZ§', payload) : body;
+        // Insert results in batched transactions for crash safety
+        const insertResult = db.prepare('INSERT INTO scan_results (id, scan_id, payload, status, length, is_anomaly, response_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
+        const insertReq = db.prepare('INSERT INTO requests (id, method, url, headers, body) VALUES (?, ?, ?, ?, ?)');
+        const insertRes = db.prepare('INSERT INTO responses (id, request_id, status, headers, body) VALUES (?, ?, ?, ?, ?)');
 
-          // Per-payload session overlay must not abort the whole scan. If the
-          // session was deleted mid-scan, or §FUZZ§ produces a hostname outside
-          // the session's bound scope, fall back to anonymous for *this*
-          // payload only. Pre-`axios` `.catch` already gives every payload its
-          // own network-error budget; preserve that shape here.
-          let pHeaders: Record<string, string>;
-          try {
-            pHeaders = SessionVault.applyToHeaders(sessionId, pUrl, headers);
-          } catch (err) {
-            if (err instanceof SessionScopeError) {
-              pHeaders = { ...(headers ?? {}) };
-            } else {
-              throw err;
+        const BATCH_SIZE = 25;
+        for (let i = 0; i < payloads.length; i += BATCH_SIZE) {
+          const batch = payloads.slice(i, i + BATCH_SIZE);
+          const batchInserts: (() => void)[] = [];
+
+          for (const payload of batch) {
+            const pUrl = targetUrl.replace('§FUZZ§', encodeURIComponent(payload));
+            const pBody = typeof body === 'string' ? body.replace('§FUZZ§', payload) : body;
+
+            let pHeaders: Record<string, string>;
+            try {
+              pHeaders = SessionVault.applyToHeaders(sessionId, pUrl, headers);
+            } catch (err) {
+              if (err instanceof SessionScopeError) {
+                pHeaders = { ...(headers ?? {}) };
+              } else {
+                throw err;
+              }
             }
+
+            const pRes = await axios({ method, url: pUrl, headers: pHeaders, data: pBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
+
+            const pStatus = pRes ? pRes.status : 0;
+            const pLength = pRes ? JSON.stringify(pRes.data).length : 0;
+            const lengthDiff = Math.abs(pLength - baselineLength);
+            const isAnomaly = (pStatus !== baselineStatus && pStatus !== 0) || (baselineLength > 0 && (lengthDiff / baselineLength) > 0.1);
+
+            const resId = uuidv4();
+            batchInserts.push(() => {
+              if (pRes) {
+                const reqId = uuidv4();
+                // Truncate response body to 100KB to prevent DB bloat
+                const resBody = typeof pRes.data === 'string' ? pRes.data : JSON.stringify(pRes.data);
+                const truncatedBody = resBody.length > 102400 ? resBody.substring(0, 102400) + '\n[truncated]' : resBody;
+                insertReq.run(reqId, method, pUrl, JSON.stringify(pHeaders), typeof pBody === 'string' ? pBody : JSON.stringify(pBody));
+                insertRes.run(resId, reqId, pStatus, JSON.stringify(pRes.headers), truncatedBody);
+              }
+              insertResult.run(uuidv4(), scanId, payload, pStatus, pLength, isAnomaly ? 1 : 0, pRes ? resId : null);
+            });
           }
 
-          const pRes = await axios({ method, url: pUrl, headers: pHeaders, data: pBody, validateStatus: () => true, timeout: 5000 }).catch(() => null);
-
-          const pStatus = pRes ? pRes.status : 0;
-          const pLength = pRes ? JSON.stringify(pRes.data).length : 0;
-
-          // Anomaly detection: status changed, or length differs by > 10%
-          const lengthDiff = Math.abs(pLength - baselineLength);
-          const isAnomaly = (pStatus !== baselineStatus && pStatus !== 0) || (baselineLength > 0 && (lengthDiff / baselineLength) > 0.1);
-
-          const resId = uuidv4();
-          if (pRes) {
-            const reqId = uuidv4();
-            db.prepare('INSERT INTO requests (id, method, url, headers, body) VALUES (?, ?, ?, ?, ?)').run(reqId, method, pUrl, JSON.stringify(pHeaders), typeof pBody === 'string' ? pBody : JSON.stringify(pBody));
-            db.prepare('INSERT INTO responses (id, request_id, status, headers, body) VALUES (?, ?, ?, ?, ?)').run(resId, reqId, pStatus, JSON.stringify(pRes.headers), typeof pRes.data === 'string' ? pRes.data : JSON.stringify(pRes.data));
-          }
-
-          db.prepare('INSERT INTO scan_results (id, scan_id, payload, status, length, is_anomaly, response_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(uuidv4(), scanId, payload, pStatus, pLength, isAnomaly ? 1 : 0, pRes ? resId : null);
+          // Commit batch atomically
+          db.transaction(() => { for (const fn of batchInserts) fn(); })();
         }
 
         db.prepare('UPDATE scans SET status = ? WHERE id = ?').run('completed', scanId);
@@ -975,11 +1057,17 @@ async function startServer() {
         console.error('Scan error:', err);
         db.prepare('UPDATE scans SET status = ? WHERE id = ?').run('failed', scanId);
       }
-    }, 0);
+    };
+    runScan().catch((err) => {
+      console.error('Unhandled scan error:', err);
+      try { db.prepare('UPDATE scans SET status = ? WHERE id = ?').run('failed', scanId); } catch {}
+    });
   });
 
   app.get('/api/scans', (req, res) => {
-    const scans = db.prepare('SELECT * FROM scans ORDER BY created_at DESC').all();
+    const limit = Math.min(parseInt(String(req.query.limit || '500'), 10) || 500, 5000);
+    const offset = parseInt(String(req.query.offset || '0'), 10) || 0;
+    const scans = db.prepare('SELECT * FROM scans ORDER BY created_at DESC LIMIT ? OFFSET ?').all(limit, offset);
     res.json(scans);
   });
 
@@ -1200,6 +1288,113 @@ async function startServer() {
     res.json({ path: subpath || '/', entries: contents });
   });
 
+  // --- WAF Bypass Engine API ---
+  app.post('/api/waf/fingerprint', async (req, res) => {
+    const { targetUrl, customHeaders } = req.body as { targetUrl: string; customHeaders?: Record<string, string> };
+    if (!targetUrl || typeof targetUrl !== 'string') {
+      return res.status(400).json({ error: 'targetUrl is required' });
+    }
+    try {
+      const detections = await WafBypassEngine.fingerprint(targetUrl, { customHeaders });
+      res.json({ target: targetUrl, detections });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/waf/bypass', async (req, res) => {
+    const { targetUrl, maxBypasses, customHeaders } = req.body as {
+      targetUrl: string; maxBypasses?: number; customHeaders?: Record<string, string>;
+    };
+    if (!targetUrl || typeof targetUrl !== 'string') {
+      return res.status(400).json({ error: 'targetUrl is required' });
+    }
+    try {
+      const detections = await WafBypassEngine.fingerprint(targetUrl, { customHeaders });
+      if (detections.length === 0) {
+        return res.json({ target: targetUrl, wafDetected: false, bypasses: [] });
+      }
+      const bypasses = await WafBypassEngine.testBypasses(targetUrl, detections, { maxBypasses, customHeaders });
+      res.json({ target: targetUrl, wafDetected: true, wafs: detections, bypasses });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/waf/techniques', (_req, res) => {
+    res.json(WafBypassEngine.getTechniques());
+  });
+
+  app.get('/api/waf/signatures', (_req, res) => {
+    res.json(WafBypassEngine.getSignatures());
+  });
+
+  // --- Origin IP Detection API ---
+  app.post('/api/origin-ip/detect', async (req, res) => {
+    const { domain, maxSubdomains } = req.body as { domain: string; maxSubdomains?: number };
+    if (!domain || typeof domain !== 'string') {
+      return res.status(400).json({ error: 'domain is required' });
+    }
+    try {
+      // Strip protocol if provided
+      const cleanDomain = domain.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+      const report = await OriginIpDetector.detect(cleanDomain, { maxSubdomains });
+      res.json(report);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Per-Endpoint Custom Headers API ---
+  app.get('/api/endpoint-headers', (req, res) => {
+    const scopeId = typeof req.query.scopeId === 'string' ? req.query.scopeId : undefined;
+    res.json(EndpointHeaders.list(scopeId));
+  });
+
+  app.post('/api/endpoint-headers', (req, res) => {
+    const { pattern, name, value, scopeId, description, priority } = req.body;
+    if (!pattern || typeof pattern !== 'string') return res.status(400).json({ error: 'pattern is required' });
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'header name is required' });
+    if (value === undefined || value === null) return res.status(400).json({ error: 'header value is required' });
+    try {
+      const header = EndpointHeaders.create({ pattern, name, value, scopeId, description, priority });
+      res.json(header);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/endpoint-headers/:id', (req, res) => {
+    try {
+      const header = EndpointHeaders.update(req.params.id, req.body);
+      res.json(header);
+    } catch (err: any) {
+      res.status(err.message.includes('not found') ? 404 : 400).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/endpoint-headers/:id', (req, res) => {
+    const deleted = EndpointHeaders.delete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Header rule not found' });
+    res.json({ success: true });
+  });
+
+  app.post('/api/endpoint-headers/:id/toggle', (req, res) => {
+    try {
+      const header = EndpointHeaders.toggle(req.params.id);
+      res.json(header);
+    } catch (err: any) {
+      res.status(404).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/endpoint-headers/match', (req, res) => {
+    const { url, scopeId } = req.body as { url: string; scopeId?: string };
+    if (!url) return res.status(400).json({ error: 'url is required' });
+    const matched = EndpointHeaders.matchUrl(url, scopeId);
+    res.json(matched);
+  });
+
   // --- Static Files & Vite Middleware ---
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -1215,8 +1410,8 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`LevarG Server running on http://localhost:${PORT}`);
+  app.listen(PORT, BIND_HOST, async () => {
+    console.log(`LevarG Server running on http://${BIND_HOST}:${PORT}`);
     // Wait for Ollama bootstrap to finish (model download may take a while)
     await ollamaReady;
   });

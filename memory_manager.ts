@@ -10,6 +10,8 @@ export interface TargetMemory {
 
 export class MemoryManager {
   private static memory: Record<string, TargetMemory> = {};
+  private static accessOrder: string[] = [];
+  private static readonly MAX_JOBS = 50;
 
   static getMemory(jobId: string, host: string): TargetMemory {
     if (!this.memory[jobId]) {
@@ -22,6 +24,12 @@ export class MemoryManager {
         discoveredUsers: [],
         findings: []
       };
+      this.accessOrder.push(jobId);
+      // Evict oldest entries if over capacity
+      while (this.accessOrder.length > this.MAX_JOBS) {
+        const oldest = this.accessOrder.shift();
+        if (oldest) delete this.memory[oldest];
+      }
     }
     return this.memory[jobId];
   }
