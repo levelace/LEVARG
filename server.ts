@@ -25,6 +25,7 @@ import { USER_AGENTS, getUserAgent, pickRandomBrowserUA } from './user_agents.js
 import { WafBypassEngine } from './waf_bypass_engine.js';
 import { OriginIpDetector } from './origin_ip_detector.js';
 import { EndpointHeaders } from './endpoint_headers.js';
+import { MatchReplace } from './match_replace.js';
 
 async function startServer() {
   // Auto-install, start, and pull model for Ollama (runs in background)
@@ -221,32 +222,51 @@ async function startServer() {
       // Layer per-endpoint custom headers (won't overwrite explicit headers)
       finalHeaders = EndpointHeaders.mergeHeaders(url, finalHeaders);
 
+      // --- Match & Replace: request phase ---
+      const mrReq = MatchReplace.applyToRequest(
+        { url, method, headers: finalHeaders, body: typeof body === 'string' ? body : JSON.stringify(body ?? '') },
+      );
+      const finalUrl = mrReq.url;
+      const finalMethod = mrReq.method;
+      finalHeaders = mrReq.headers;
+      const finalBody = mrReq.body || body;
+
       const startTime = Date.now();
       const response = await axios({
-        method,
-        url,
+        method: finalMethod,
+        url: finalUrl,
         headers: finalHeaders,
-        data: body,
+        data: finalBody,
         validateStatus: () => true,
         timeout: 10000
       });
       const duration = Date.now() - startTime;
+
+      // --- Match & Replace: response phase ---
+      const mrRes = MatchReplace.applyToResponse(
+        { url: finalUrl, method: finalMethod, headers: finalHeaders, body: typeof finalBody === 'string' ? finalBody : JSON.stringify(finalBody ?? '') },
+        {
+          status: response.status,
+          headers: response.headers as Record<string, string>,
+          body: typeof response.data === 'string' ? response.data : JSON.stringify(response.data),
+        },
+      );
 
       const requestId = uuidv4();
       const responseId = uuidv4();
 
       // Save request/response for history/diff
       db.prepare('INSERT INTO requests (id, method, url, headers, body) VALUES (?, ?, ?, ?, ?)')
-        .run(requestId, method, url, JSON.stringify(finalHeaders), typeof body === 'string' ? body : JSON.stringify(body));
+        .run(requestId, finalMethod, finalUrl, JSON.stringify(finalHeaders), typeof finalBody === 'string' ? finalBody : JSON.stringify(finalBody));
       
       db.prepare('INSERT INTO responses (id, request_id, status, headers, body) VALUES (?, ?, ?, ?, ?)')
-        .run(responseId, requestId, response.status, JSON.stringify(response.headers), typeof response.data === 'string' ? response.data : JSON.stringify(response.data));
+        .run(responseId, requestId, mrRes.status, JSON.stringify(mrRes.headers), typeof mrRes.body === 'string' ? mrRes.body : JSON.stringify(mrRes.body));
 
       res.json({
         id: responseId,
-        status: response.status,
-        headers: response.headers,
-        body: response.data,
+        status: mrRes.status,
+        headers: mrRes.headers,
+        body: mrRes.body,
         duration
       });
     } catch (err: any) {
@@ -1395,6 +1415,74 @@ async function startServer() {
     if (!url) return res.status(400).json({ error: 'url is required' });
     const matched = EndpointHeaders.matchUrl(url, scopeId);
     res.json(matched);
+  });
+
+  // --- Match & Replace API ---
+  app.get('/api/match-replace', (req, res) => {
+    const scopeId = typeof req.query.scopeId === 'string' ? req.query.scopeId : undefined;
+    res.json(MatchReplace.list(scopeId));
+  });
+
+  app.get('/api/match-replace/catalog', (_req, res) => {
+    res.json({
+      conditions: MatchReplace.getConditionCategories(),
+      actions: MatchReplace.getActionCategories(),
+    });
+  });
+
+  app.get('/api/match-replace/:id', (req, res) => {
+    const rule = MatchReplace.get(req.params.id);
+    if (!rule) return res.status(404).json({ error: 'Rule not found' });
+    res.json(rule);
+  });
+
+  app.post('/api/match-replace', (req, res) => {
+    const { name, phase, conditions, conditionLogic, actions, priority, scopeId, comment } = req.body;
+    if (!name || typeof name !== 'string') return res.status(400).json({ error: 'name is required' });
+    try {
+      const rule = MatchReplace.create({ name, phase, conditions, conditionLogic, actions, priority, scopeId, comment });
+      res.json(rule);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/match-replace/:id', (req, res) => {
+    try {
+      const rule = MatchReplace.update(req.params.id, req.body);
+      res.json(rule);
+    } catch (err: any) {
+      res.status(err.message.includes('not found') ? 404 : 400).json({ error: err.message });
+    }
+  });
+
+  app.delete('/api/match-replace/:id', (req, res) => {
+    const deleted = MatchReplace.delete(req.params.id);
+    if (!deleted) return res.status(404).json({ error: 'Rule not found' });
+    res.json({ success: true });
+  });
+
+  app.post('/api/match-replace/:id/toggle', (req, res) => {
+    try {
+      const rule = MatchReplace.toggle(req.params.id);
+      res.json(rule);
+    } catch (err: any) {
+      res.status(404).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/match-replace/:id/duplicate', (req, res) => {
+    try {
+      const rule = MatchReplace.duplicate(req.params.id);
+      res.json(rule);
+    } catch (err: any) {
+      res.status(404).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/match-replace/:id/reset-hits', (req, res) => {
+    MatchReplace.resetHitCount(req.params.id);
+    res.json({ success: true });
   });
 
   // --- Upgrade / About API ---
