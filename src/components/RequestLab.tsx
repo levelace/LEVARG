@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Save, Copy, Terminal, FlaskConical, AlertCircle, Clock, Database, Sparkles, History, Plus } from 'lucide-react';
+import { Play, Save, Copy, Terminal, FlaskConical, AlertCircle, Clock, Database, Sparkles, History, Plus, Shuffle } from 'lucide-react';
 import Markdown from 'react-markdown';
 import SessionSelector from './SessionSelector';
+import MatchReplacePanel from './MatchReplacePanel';
 
 export default function RequestLab({ initialRequest }: { initialRequest?: any }) {
   const [method, setMethod] = useState('GET');
@@ -18,6 +19,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
   const [history, setHistory] = useState<any[]>([]);
   const [historySearch, setHistorySearch] = useState('');
   const [viewMode, setViewMode] = useState<'pretty' | 'raw' | 'split'>('pretty');
+  const [sidePanel, setSidePanel] = useState<'history' | 'matchreplace'>('history');
 
   useEffect(() => {
     if (initialRequest) {
@@ -166,52 +168,79 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
       </header>
 
       <div className="flex-1 grid grid-cols-12 overflow-hidden relative z-10">
-        {/* History Sidebar */}
-        <div className="col-span-2 border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/30 backdrop-blur-sm">
-          <div className="p-3 bg-black/50 border-b border-emerald-900/30 text-[10px] font-mono text-emerald-500/70 uppercase tracking-wider flex items-center gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
-            <History className="w-3 h-3" /> History
+        {/* Sidebar: History + Match & Replace */}
+        <div className="col-span-3 border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/30 backdrop-blur-sm">
+          <div className="flex bg-black/50 border-b border-emerald-900/30 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
+            <button
+              onClick={() => setSidePanel('history')}
+              className={cn(
+                'flex-1 p-2.5 text-[10px] font-mono uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all border-b-2',
+                sidePanel === 'history'
+                  ? 'text-emerald-300 border-emerald-400 bg-emerald-900/10'
+                  : 'text-emerald-500/50 border-transparent hover:text-emerald-400'
+              )}
+            >
+              <History className="w-3 h-3" /> History
+            </button>
+            <button
+              onClick={() => setSidePanel('matchreplace')}
+              className={cn(
+                'flex-1 p-2.5 text-[10px] font-mono uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all border-b-2',
+                sidePanel === 'matchreplace'
+                  ? 'text-cyan-300 border-cyan-400 bg-cyan-900/10'
+                  : 'text-emerald-500/50 border-transparent hover:text-emerald-400'
+              )}
+            >
+              <Shuffle className="w-3 h-3" /> M&R
+            </button>
           </div>
-          <div className="p-2 border-b border-emerald-900/30">
-            <input
-              type="text"
-              placeholder="Search history..."
-              value={historySearch}
-              onChange={(e) => setHistorySearch(e.target.value)}
-              className="w-full bg-black/50 border border-emerald-900/50 text-[10px] font-mono px-2 py-1 rounded focus:outline-none focus:border-emerald-500/50"
-            />
-          </div>
-          <div className="flex-1 overflow-y-auto scrollbar-hide">
-            {history.filter(item => item.url.toLowerCase().includes(historySearch.toLowerCase()) || item.method.toLowerCase().includes(historySearch.toLowerCase())).map((item) => (
-              <div 
-                key={item.id} 
-                onClick={() => loadHistoryItem(item)}
-                className="p-3 border-b border-emerald-900/20 hover:bg-emerald-950/30 cursor-pointer transition-colors group relative overflow-hidden"
-              >
-                <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.02)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_3s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />
-                <div className="flex justify-between items-center mb-1 relative z-10">
-                  <span className={cn(
-                    "text-[10px] font-mono px-1.5 py-0.5 rounded-sm border",
-                    item.method === 'GET' ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-400" :
-                    item.method === 'POST' ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" :
-                    "bg-amber-500/10 border-amber-500/30 text-amber-400"
-                  )}>
-                    {item.method}
-                  </span>
-                  <span className={cn(
-                    "text-[10px] font-mono",
-                    item.status >= 200 && item.status < 300 ? "text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" : "text-red-400 drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]"
-                  )}>
-                    {item.status}
-                  </span>
-                </div>
-                <div className="text-xs font-mono text-emerald-100/70 group-hover:text-emerald-100 truncate w-full transition-colors relative z-10">{item.url}</div>
+          {sidePanel === 'history' ? (
+            <>
+              <div className="p-2 border-b border-emerald-900/30">
+                <input
+                  type="text"
+                  placeholder="Search history..."
+                  value={historySearch}
+                  onChange={(e) => setHistorySearch(e.target.value)}
+                  className="w-full bg-black/50 border border-emerald-900/50 text-[10px] font-mono px-2 py-1 rounded focus:outline-none focus:border-emerald-500/50"
+                />
               </div>
-            ))}
-          </div>
+              <div className="flex-1 overflow-y-auto scrollbar-hide">
+                {history.filter(item => item.url.toLowerCase().includes(historySearch.toLowerCase()) || item.method.toLowerCase().includes(historySearch.toLowerCase())).map((item) => (
+                  <div 
+                    key={item.id} 
+                    onClick={() => loadHistoryItem(item)}
+                    className="p-3 border-b border-emerald-900/20 hover:bg-emerald-950/30 cursor-pointer transition-colors group relative overflow-hidden"
+                  >
+                    <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.02)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_3s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <div className="flex justify-between items-center mb-1 relative z-10">
+                      <span className={cn(
+                        "text-[10px] font-mono px-1.5 py-0.5 rounded-sm border",
+                        item.method === 'GET' ? "bg-cyan-500/10 border-cyan-500/30 text-cyan-400" :
+                        item.method === 'POST' ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" :
+                        "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                      )}>
+                        {item.method}
+                      </span>
+                      <span className={cn(
+                        "text-[10px] font-mono",
+                        item.status >= 200 && item.status < 300 ? "text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]" : "text-red-400 drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]"
+                      )}>
+                        {item.status}
+                      </span>
+                    </div>
+                    <div className="text-xs font-mono text-emerald-100/70 group-hover:text-emerald-100 truncate w-full transition-colors relative z-10">{item.url}</div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : (
+            <MatchReplacePanel />
+          )}
         </div>
 
         {/* Request Panel */}
-        <div className="col-span-5 border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/40 backdrop-blur-md">
+        <div className="col-span-4 border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/40 backdrop-blur-md">
           <div className="p-3 bg-black/50 border-b border-emerald-900/30 flex gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <select
               value={method}
