@@ -1,4 +1,5 @@
-import { GoogleGenAI } from "@google/genai";
+import { OllamaClient } from './ollama_client.js';
+import { getSqliPayloads, getXssPayloads, getLfiPayloads } from './seclists.js';
 
 export interface PayloadTier {
   standard: string[];
@@ -202,15 +203,35 @@ export class PayloadOven {
     }
   };
 
+  /**
+   * Pull supplementary payloads for the given category/tier from SecLists.
+   * Returns [] when the category has no SecLists mapping or SecLists is missing
+   * on disk — callers always get the hardcoded baseline regardless.
+   */
+  private static secListsAugment(category: string | undefined, layerKey: 'standard' | 'advanced' | 'elite'): string[] {
+    if (!category) return [];
+    switch (category) {
+      case 'SQLi': return getSqliPayloads(layerKey);
+      case 'XSS':  return getXssPayloads(layerKey);
+      case 'LFI':  return getLfiPayloads(layerKey);
+      default:     return [];
+    }
+  }
+
   static getPayloads(category?: string, layer: 1 | 2 | 3 = 1, count: number = 10, evasive: boolean = false): string[] {
     const layerKey = layer === 1 ? 'standard' : layer === 2 ? 'advanced' : 'elite';
-    
+
     let payloads: string[] = [];
     if (category && this.oven[category]) {
-      payloads = this.shuffle(this.oven[category][layerKey]).slice(0, count);
+      const baseline = this.oven[category][layerKey];
+      const augment = this.secListsAugment(category, layerKey);
+      const merged = Array.from(new Set([...baseline, ...augment]));
+      payloads = this.shuffle(merged).slice(0, count);
     } else {
-      const all = Object.values(this.oven).flatMap(tier => tier[layerKey]);
-      payloads = this.shuffle(all).slice(0, count);
+      const baseline = Object.values(this.oven).flatMap(tier => tier[layerKey]);
+      const augment = ['SQLi', 'XSS', 'LFI'].flatMap(c => this.secListsAugment(c, layerKey));
+      const merged = Array.from(new Set([...baseline, ...augment]));
+      payloads = this.shuffle(merged).slice(0, count);
     }
 
     if (evasive) {
@@ -227,7 +248,7 @@ export class PayloadOven {
     return Object.keys(this.oven);
   }
 
-  static async generateCustomPayload(ai: GoogleGenAI | null, category: string, context: string): Promise<string> {
+  static async generateCustomPayload(ai: OllamaClient | null, category: string, context: string): Promise<string> {
     if (!ai) return this.getPayloads(category, 1, 1)[0];
 
     const prompt = `As an elite security researcher (argila) and red-team strategist, generate a highly specialized, stealthy ${category} payload for the following context:
@@ -239,11 +260,7 @@ export class PayloadOven {
     Return ONLY the raw payload string, no explanation.`;
 
     try {
-      const res = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt
-      });
-      const rawPayload = res.text?.trim() || this.getPayloads(category, 1, 1)[0];
+      const rawPayload = (await ai.generate(prompt))?.trim() || this.getPayloads(category, 1, 1)[0];
 
       // Randomly apply an extra layer of mutation to AI generated payloads for maximum evasion
       const mutationTypes: ('url' | 'double-url' | 'html' | 'hex' | 'unicode')[] = ['url', 'double-url', 'html', 'hex', 'unicode'];

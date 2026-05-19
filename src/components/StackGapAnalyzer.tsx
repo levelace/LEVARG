@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Layers, Play, AlertCircle, RefreshCw, Server, Activity, Terminal } from 'lucide-react';
+import SessionSelector from './SessionSelector';
 
 export default function StackGapAnalyzer() {
   const [url, setUrl] = useState('');
@@ -9,6 +10,7 @@ export default function StackGapAnalyzer() {
   const [findings, setFindings] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [sessionId, setSessionId] = useState('');
 
   const fetchFindings = async () => {
     try {
@@ -45,7 +47,7 @@ export default function StackGapAnalyzer() {
       const res = await fetch('/api/stack-gap/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, method, headers: parsedHeaders })
+        body: JSON.stringify({ url, method, headers: parsedHeaders, sessionId: sessionId || undefined })
       });
       
       const data = await res.json();
@@ -111,7 +113,11 @@ export default function StackGapAnalyzer() {
               </button>
             </div>
           </div>
-          
+
+          <div className="mb-4">
+            <SessionSelector value={sessionId} onChange={setSessionId} />
+          </div>
+
           <div className="relative group">
             <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.05)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity rounded-md" />
             <label className="block text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 mb-2">Headers (JSON)</label>

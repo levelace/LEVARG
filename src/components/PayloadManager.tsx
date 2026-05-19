@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import { Database, Plus, Trash2, Code, Terminal, Search, Sparkles, Clock, Copy, Flame, Shield, Zap, Skull } from 'lucide-react';
-import { GoogleGenAI } from '@google/genai';
 import { motion, AnimatePresence } from 'motion/react';
 
 import { clsx, type ClassValue } from 'clsx';
@@ -69,26 +68,17 @@ export default function PayloadManager() {
       alert("Please provide a name/description for the payload set first.");
       return;
     }
-    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY;
-    if (!apiKey) {
-      alert('Gemini API Key not found. Please set GEMINI_API_KEY or API_KEY in your environment.');
-      return;
-    }
-    
     setGenerating(true);
     try {
-      const ai = new GoogleGenAI({ apiKey });
-      const prompt = `Generate a list of 20 highly effective security testing payloads for the following scenario: ${newPayload.name}.
-      The payload type is: ${newPayload.type}.
-      Return ONLY the payloads, one per line. Do not include markdown formatting, numbers, or explanations.`;
-      
-      const result = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      const res = await fetch('/api/ai/generate-payloads', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newPayload.name, type: newPayload.type })
       });
-      
-      if (result.text) {
-        setNewPayload({ ...newPayload, content: result.text.trim() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'AI generation failed');
+      if (data.content) {
+        setNewPayload({ ...newPayload, content: data.content });
       }
     } catch (err: any) {
       console.error('AI Generation failed:', err);

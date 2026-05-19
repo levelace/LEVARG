@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 
-const dbPath = process.env.DB_PATH || 'pocforge.db';
-const db = new Database(dbPath);
+const dataDir = process.env.LEVARG_DATA_DIR || process.cwd();
+const db = new Database(path.join(dataDir, 'pocforge.db'));
 
 // Initialize schema
 db.exec(`
@@ -106,6 +106,90 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(job_id) REFERENCES automation_jobs(id)
   );
+
+  -- Authenticated-testing sessions: named cookie/header bundles bound to a scope.
+  -- A session captured via the built-in browser (or hand-crafted) can be injected
+  -- into Request Lab and Flow Runner so authenticated requests reuse the auth
+  -- material. Bound to scope_id so a session for scope A can never be used
+  -- against scope B.
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    cookies TEXT,        -- JSON array of {name, value, domain, path, expires, httpOnly, secure, sameSite}
+    headers TEXT,        -- JSON object of static headers (Authorization, X-CSRF-Token, ...)
+    storage TEXT,        -- JSON {localStorage:{}, sessionStorage:{}}
+    user_agent TEXT,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
+    UNIQUE(scope_id, name)
+  );
+
+  -- Stored login credentials per scope. Used by auth-flow macros to fill
+  -- login forms during a hunt without re-prompting the operator. Bound 1:1
+  -- to a Scope so credentials for scope A can never be replayed against
+  -- scope B. Plaintext-at-rest by design (matches Burp/ZAP project files);
+  -- the pocforge.db file lives next to the project and inherits the same
+  -- filesystem permissions the operator already grants their tooling.
+  CREATE TABLE IF NOT EXISTS credentials (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    notes TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
+    UNIQUE(scope_id, label)
+  );
+
+  -- Replayable login macros bound to a scope (and optionally a credential).
+  -- A flow is an ordered list of steps {goto|fill|click|press|waitForSelector|
+  -- waitForUrl|sleep}; runtime checks every navigated/typed URL against the
+  -- bound scope's domain before executing — the operator's stored credentials
+  -- are NEVER typed into a host outside the scope (third-party OAuth providers
+  -- like accounts.google.com / facebook.com / appleid.apple.com are
+  -- explicitly out of scope and require manual login via the built-in browser
+  -- or the OS-browser extension).
+  CREATE TABLE IF NOT EXISTS auth_flows (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    credential_id TEXT,
+    name TEXT NOT NULL,
+    steps TEXT NOT NULL,                    -- JSON array of AuthFlowStep
+    trigger_mode TEXT NOT NULL DEFAULT 'preflight', -- 'preflight' | 'on_401' | 'discovery' | 'all' | 'manual'
+    is_default INTEGER NOT NULL DEFAULT 0,  -- if 1, applied automatically when a hunt starts on this scope without explicit auth_flow_id
+    last_run_at DATETIME,
+    last_status TEXT,                       -- 'ok' | 'error'
+    last_error TEXT,
+    success_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE,
+    FOREIGN KEY(credential_id) REFERENCES credentials(id) ON DELETE SET NULL,
+    UNIQUE(scope_id, name)
+  );
+
+  -- Pairing tokens for the OS-browser extension. The operator generates a
+  -- token in the LEVARG UI, pastes it into the extension's options page, and
+  -- the extension can then POST captured cookies to /api/extension/cookies.
+  -- Tokens are scope-bound so an extension paired for scope A can't smuggle
+  -- cookies into a session bound to scope B. last_used_at and request count
+  -- are recorded for audit.
+  CREATE TABLE IF NOT EXISTS extension_tokens (
+    id TEXT PRIMARY KEY,
+    scope_id TEXT NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    label TEXT,
+    last_used_at DATETIME,
+    use_count INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(scope_id) REFERENCES scopes(id) ON DELETE CASCADE
+  );
 `);
 
 // Migration: Add 'phase' column to 'automation_jobs' if it doesn't exist
@@ -114,5 +198,23 @@ const hasPhase = tableInfo.some(col => col.name === 'phase');
 if (!hasPhase) {
   db.exec("ALTER TABLE automation_jobs ADD COLUMN phase TEXT");
 }
+
+// --- Performance indexes ---
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_responses_request_id ON responses(request_id);
+  CREATE INDEX IF NOT EXISTS idx_scan_results_scan_id ON scan_results(scan_id);
+  CREATE INDEX IF NOT EXISTS idx_automation_logs_job_id ON automation_logs(job_id);
+  CREATE INDEX IF NOT EXISTS idx_endpoints_created ON endpoints(created_at DESC);
+  CREATE INDEX IF NOT EXISTS idx_sessions_scope_id ON sessions(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_credentials_scope_id ON credentials(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_auth_flows_scope_id ON auth_flows(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_extension_tokens_scope_id ON extension_tokens(scope_id);
+  CREATE INDEX IF NOT EXISTS idx_stack_gap_findings_created ON stack_gap_findings(created_at DESC);
+`);
+
+// --- Crash recovery: mark orphaned 'running' scans/jobs as 'failed' ---
+db.prepare("UPDATE scans SET status = 'failed' WHERE status = 'running'").run();
+db.prepare("UPDATE automation_jobs SET status = 'failed' WHERE status = 'running'").run();
 
 export default db;

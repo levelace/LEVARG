@@ -6,3 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+.browser_profiles/
+pocforge.db
+release/
+static/nodejs/server.js

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import db from './db.js';
+import { SessionVault } from './session_vault.js';
 
 interface GapFinding {
   endpoint: string;
@@ -146,7 +147,12 @@ export class StackGapAnalyzer {
     }
   }
 
-  static async analyze(url: string, method: string = 'GET', headers: any = {}) {
+  static async analyze(
+    url: string,
+    method: string = 'GET',
+    headers: Record<string, string> = {},
+    sessionId?: string,
+  ) {
     // Scope Check
     const scopes = db.prepare('SELECT domain FROM scopes').all() as { domain: string }[];
     const isAllowed = scopes.some(s => {
@@ -163,104 +169,178 @@ export class StackGapAnalyzer {
 
     const findings: GapFinding[] = [];
 
-    // Baseline
-    const startTime = Date.now();
-    const baselineRes = await axios({ method, url, headers, validateStatus: () => true, timeout: 5000 }).catch(() => null);
-    const baselineLatency = Date.now() - startTime;
-    
+    // Baseline (session-aware)
+    const baseHeaders = SessionVault.applyToHeaders(sessionId, url, headers);
+    const baselineRes = await axios({ method, url, headers: baseHeaders, validateStatus: () => true, timeout: 5000 }).catch(() => null);
+
     if (!baselineRes) return findings;
 
     const baselineStatus = baselineRes.status;
-    const baselineLength = JSON.stringify(baselineRes.data).length;
+    const baselineBody = typeof baselineRes.data === 'string' ? baselineRes.data : JSON.stringify(baselineRes.data ?? '');
+    const baselineCT = String(baselineRes.headers['content-type'] ?? '').toLowerCase();
 
-    const mutations = [
-      // Header Mutations
-      { type: 'Header: X-Forwarded-For', headers: { ...headers, 'X-Forwarded-For': '127.0.0.1' }, url },
-      { type: 'Header: X-Original-URL', headers: { ...headers, 'X-Original-URL': '/admin' }, url },
-      { type: 'Header: X-Rewrite-URL', headers: { ...headers, 'X-Rewrite-URL': '/admin' }, url },
-      { type: 'Header: X-Forwarded-Host', headers: { ...headers, 'X-Forwarded-Host': 'localhost' }, url },
-      
-      // Parameter Duplication
-      { type: 'Param Duplication', headers, url: url.includes('?') ? `${url}&id=1&id=2` : `${url}?id=1&id=2` },
-      
-      // URL Normalization
-      { type: 'URL Normalization: /../', headers, url: url.replace(/(\/[^\/]+)$/, '/../admin') },
-      { type: 'URL Normalization: //', headers, url: url.replace(/(\/[^\/]+)$/, '//admin') },
-      { type: 'URL Normalization: /%2e/', headers, url: url.replace(/(\/[^\/]+)$/, '/%2e/admin') },
-      
-      // Encoding Variations
-      { type: 'Encoding: %2e', headers, url: url + '%2e' },
-      { type: 'Encoding: %252e', headers, url: url + '%252e' },
-      { type: 'Encoding: %2f', headers, url: url + '%2f' },
-      
-      // Method Confusion
-      { type: 'Method Confusion: POST', headers, url, method: 'POST' },
-      { type: 'Method Confusion: HEAD', headers, url, method: 'HEAD' },
-      { type: 'Method Confusion: OPTIONS', headers, url, method: 'OPTIONS' },
-      { type: 'Method Confusion: TRACE', headers, url, method: 'TRACE' },
-      
-      // Content Type Confusion
-      { type: 'Content-Type: multipart/form-data', headers: { ...headers, 'Content-Type': 'multipart/form-data' }, url },
-      { type: 'Content-Type: text/plain', headers: { ...headers, 'Content-Type': 'text/plain' }, url },
+    /**
+     * Mutation classes:
+     * - **escalation**: header/method probes that aim to flip 401/403 → 200.
+     *   Only flag if baseline was unauthorized AND mutation returned 200 AND
+     *   the body is not the same auth-redirect HTML.
+     * - **smuggling**: TE/CL/H2C probes. Only flag if response shape betrays
+     *   desync (HTTP/1.x status line embedded in body, multiple Content-Length
+     *   headers reflected, or server emits 400/501 with a smuggling-specific
+     *   error string).
+     * - **normalization**: path-mangled URLs aimed at auth bypass. Only flag
+     *   if mutation returns 200 AND base was 401/403/404 AND body is not the
+     *   same SPA shell as baseline.
+     */
+    interface Mutation {
+      type: string;
+      class: 'escalation' | 'smuggling' | 'normalization' | 'control';
+      headers: Record<string, string>;
+      url: string;
+      method?: string;
+      data?: string;
+    }
 
-      // H2C Smuggling / Upgrade Mutations
-      { type: 'H2C Smuggling: Upgrade', headers: { ...headers, 'Connection': 'Upgrade', 'Upgrade': 'h2c' }, url },
-      { type: 'H2C Smuggling: HTTP2-Settings', headers: { ...headers, 'Connection': 'Upgrade', 'Upgrade': 'h2c', 'HTTP2-Settings': 'AAMAAABkAAQAAP__', 'Host': 'localhost' }, url },
+    const mutations: Mutation[] = [
+      // Escalation: header tricks for IP/auth bypass
+      { type: 'Header: X-Forwarded-For', class: 'escalation', headers: { ...headers, 'X-Forwarded-For': '127.0.0.1' }, url },
+      { type: 'Header: X-Original-URL', class: 'escalation', headers: { ...headers, 'X-Original-URL': '/admin' }, url },
+      { type: 'Header: X-Rewrite-URL', class: 'escalation', headers: { ...headers, 'X-Rewrite-URL': '/admin' }, url },
+      { type: 'Header: X-Forwarded-Host', class: 'escalation', headers: { ...headers, 'X-Forwarded-Host': 'localhost' }, url },
 
-      // Chunked Encoding / Transfer-Encoding Mutations (Smuggling Basics)
-      { type: 'Transfer-Encoding: chunked', headers: { ...headers, 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '0\r\n\r\n' },
-      { type: 'Transfer-Encoding: xchunked', headers: { ...headers, 'Transfer-Encoding': 'xchunked' }, url, method: 'POST', data: '0\r\n\r\n' },
-      { type: 'Transfer-Encoding: chunked, identity', headers: { ...headers, 'Transfer-Encoding': 'chunked, identity' }, url, method: 'POST', data: '0\r\n\r\n' },
+      // Method confusion: only meaningful as escalation
+      { type: 'Method: POST', class: 'escalation', headers, url, method: 'POST' },
+      { type: 'Method: PUT', class: 'escalation', headers, url, method: 'PUT' },
+      { type: 'Method: DELETE', class: 'escalation', headers, url, method: 'DELETE' },
 
-      // CL.TE / TE.CL Desync / Smuggling (Probes)
-      { type: 'Smuggling: CL.TE Probe', headers: { ...headers, 'Content-Length': '4', 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '1\r\nZ\r\nQ' },
-      { type: 'Smuggling: TE.CL Probe', headers: { ...headers, 'Content-Length': '6', 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '0\r\n\r\nX' },
-      { type: 'Smuggling: Double Content-Length', headers: { ...headers, 'Content-Length': '0', 'Content-Length ': '0' }, url, method: 'POST' },
-      { type: 'Smuggling: Tab-Space-TE', headers: { ...headers, 'Transfer-Encoding\t': 'chunked' }, url, method: 'POST', data: '0\r\n\r\n' },
+      // H2C smuggling probes
+      { type: 'H2C Upgrade', class: 'smuggling', headers: { ...headers, 'Connection': 'Upgrade', 'Upgrade': 'h2c' }, url },
+      { type: 'H2C HTTP2-Settings', class: 'smuggling', headers: { ...headers, 'Connection': 'Upgrade', 'Upgrade': 'h2c', 'HTTP2-Settings': 'AAMAAABkAAQAAP__', 'Host': 'localhost' }, url },
 
-      // Normalization Bypasses (Modern Path Traversal/Auth Bypass Probes)
-      { type: 'Normalization: /.;/', headers, url: url.replace(/(\/[^\/]+)$/, '/.;/admin') },
-      { type: 'Normalization: /..;/', headers, url: url.replace(/(\/[^\/]+)$/, '/..;/admin') },
-      { type: 'Normalization: /..%2f', headers, url: url.replace(/(\/[^\/]+)$/, '/..%2fadmin') },
-      { type: 'Normalization: /%2e%2e%2f', headers, url: url.replace(/(\/[^\/]+)$/, '/%2e%2e%2fadmin') },
-      { type: 'Normalization: /%ef%bc%8f', headers, url: url.replace(/(\/[^\/]+)$/, '/%ef%bc%8fadmin') },
-      { type: 'Normalization: Null Byte', headers, url: url + '%00' },
+      // CL.TE / TE.CL desync probes
+      { type: 'Smuggling: CL.TE', class: 'smuggling', headers: { ...headers, 'Content-Length': '4', 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '1\r\nZ\r\nQ' },
+      { type: 'Smuggling: TE.CL', class: 'smuggling', headers: { ...headers, 'Content-Length': '6', 'Transfer-Encoding': 'chunked' }, url, method: 'POST', data: '0\r\n\r\nX' },
+      { type: 'Smuggling: Double-CL', class: 'smuggling', headers: { ...headers, 'Content-Length': '0', 'Content-Length ': '0' }, url, method: 'POST' },
+      { type: 'Smuggling: Tab-TE', class: 'smuggling', headers: { ...headers, 'Transfer-Encoding\t': 'chunked' }, url, method: 'POST', data: '0\r\n\r\n' },
+
+      // Normalization bypasses: only meaningful when base was unauthorized
+      { type: 'Normalization: /..;/', class: 'normalization', headers, url: url.replace(/(\/[^\/]+)$/, '/..;/admin') },
+      { type: 'Normalization: /..%2f', class: 'normalization', headers, url: url.replace(/(\/[^\/]+)$/, '/..%2fadmin') },
+      { type: 'Normalization: /%2e%2e%2f', class: 'normalization', headers, url: url.replace(/(\/[^\/]+)$/, '/%2e%2e%2fadmin') },
+      { type: 'Normalization: /.;/admin', class: 'normalization', headers, url: url.replace(/(\/[^\/]+)$/, '/.;/admin') },
+    ];
+
+    // For normalization probes, also fetch the would-be target URL directly
+    // (e.g. /admin without the path-mangling). If the mangled URL returns the
+    // same content as a direct /admin GET, the server normalized cleanly —
+    // there's no bypass, the server just resolves /..%2fadmin to /admin like
+    // any browser. A real bypass means the WAF blocks /admin but lets the
+    // mangled form through.
+    let directAdminStatus: number | null = null;
+    let directAdminBody = '';
+    try {
+      const adminUrl = new URL(url);
+      adminUrl.pathname = '/admin';
+      const adminRes = await axios.get(adminUrl.toString(), {
+        headers: SessionVault.applyToHeaders(sessionId, adminUrl.toString(), headers),
+        validateStatus: () => true,
+        timeout: 5000,
+      });
+      directAdminStatus = adminRes.status;
+      directAdminBody = typeof adminRes.data === 'string' ? adminRes.data : JSON.stringify(adminRes.data ?? '');
+    } catch { /* skip if /admin probe fails */ }
+
+    /** Snippet that strongly suggests an admin/internal panel was reached. */
+    const ADMIN_MARKERS = [
+      'admin panel', 'administrator', 'dashboard', 'admin login',
+      'sign in to admin', '/wp-admin', 'phpmyadmin', 'adminer',
+      'spring boot admin', 'rabbitmq management', 'kibana',
+    ];
+    /** Indicators of HTTP request smuggling at the proxy/origin boundary. */
+    const SMUGGLING_MARKERS = [
+      'HTTP/1.1 ', 'HTTP/1.0 ',                        // status line embedded in body
+      'invalid chunked encoding', 'malformed chunk',
+      'duplicate content-length', 'invalid content-length',
+      'Bad chunk', 'transfer-encoding chunked but no chunked encoding',
     ];
 
     for (const mutation of mutations) {
       try {
-        const mStartTime = Date.now();
+        const mHeaders = SessionVault.applyToHeaders(sessionId, mutation.url, mutation.headers);
         const mRes = await axios({
           method: mutation.method || method,
           url: mutation.url,
-          headers: mutation.headers,
+          headers: mHeaders,
           validateStatus: () => true,
-          timeout: 5000
+          timeout: 5000,
+          data: mutation.data,
         });
-        const mLatency = Date.now() - mStartTime;
 
         const mStatus = mRes.status;
-        const mLength = JSON.stringify(mRes.data).length;
-        
-        const lengthDiff = Math.abs(mLength - baselineLength);
-        const isSignificantLengthDiff = baselineLength > 0 && (lengthDiff / baselineLength) > 0.1;
+        const mBody = typeof mRes.data === 'string' ? mRes.data : JSON.stringify(mRes.data ?? '');
+        const mCT = String(mRes.headers['content-type'] ?? '').toLowerCase();
 
-        if (mStatus !== baselineStatus || isSignificantLengthDiff) {
+        let triggered = false;
+        let evidence = '';
+        let confidence: 'high' | 'medium' = 'medium';
+
+        if (mutation.class === 'escalation') {
+          // Only flag if baseline was 401/403/404 → mutation 200 AND body
+          // differs from baseline (not just the same auth-required HTML).
+          const escalated = (baselineStatus === 401 || baselineStatus === 403 || baselineStatus === 404)
+            && mStatus === 200
+            && mBody !== baselineBody;
+          if (escalated) {
+            const hasAdminSignal = ADMIN_MARKERS.some(m => mBody.toLowerCase().includes(m));
+            triggered = true;
+            confidence = hasAdminSignal ? 'high' : 'medium';
+            evidence = `${baselineStatus} → 200 (${mBody.length} bytes${hasAdminSignal ? ', admin marker present' : ''})`;
+          }
+        } else if (mutation.class === 'normalization') {
+          // Only flag if base was unauthorized AND mutation reached an admin-
+          // looking page that the direct /admin probe could NOT reach.
+          if ((baselineStatus === 401 || baselineStatus === 403 || baselineStatus === 404) && mStatus === 200) {
+            // If a direct /admin probe ALSO returns 200 with the same body,
+            // the server simply has /admin open — that's a separate finding
+            // (handled by Phase 4b sensitive-files), not a normalization gap.
+            const sameAsDirect = directAdminStatus === 200 && mBody === directAdminBody;
+            const hasAdminSignal = ADMIN_MARKERS.some(m => mBody.toLowerCase().includes(m));
+            if (!sameAsDirect && hasAdminSignal) {
+              triggered = true;
+              confidence = 'high';
+              evidence = `Path-normalization bypass: ${baselineStatus} on ${url} but 200 on ${mutation.url} with admin markers`;
+            }
+          }
+        } else if (mutation.class === 'smuggling') {
+          // Need actual evidence of desync, not status change.
+          const hasSmugglingMarker = SMUGGLING_MARKERS.some(m => mBody.includes(m));
+          // Status line embedded as a substring in HTML body (HTTP/1.1 200 OK)
+          // strongly indicates desync. Skip if the response itself is HTML
+          // describing HTTP requests (docs pages mention HTTP/1.1).
+          const isHtml = mCT.includes('text/html') || baselineCT.includes('text/html');
+          const hasEmbeddedStatusLine = isHtml && /HTTP\/1\.[01] \d{3} /.test(mBody) && !baselineBody.includes('HTTP/1.');
+          if (hasSmugglingMarker || hasEmbeddedStatusLine) {
+            triggered = true;
+            confidence = 'high';
+            evidence = `Smuggling marker in response: ${SMUGGLING_MARKERS.find(m => mBody.includes(m)) ?? 'embedded HTTP status line'}`;
+          }
+        }
+
+        if (triggered) {
           const finding: GapFinding = {
             endpoint: url,
             mutation_type: mutation.type,
             baseline_status: baselineStatus,
             mutated_status: mStatus,
-            evidence: `Length diff: ${lengthDiff}, Latency diff: ${Math.abs(mLatency - baselineLatency)}ms`,
-            confidence: mStatus !== baselineStatus ? 'high' : 'medium'
+            evidence,
+            confidence,
           };
           findings.push(finding);
-          
           db.prepare('INSERT INTO stack_gap_findings (id, endpoint, mutation_type, baseline_status, mutated_status, evidence, confidence) VALUES (?, ?, ?, ?, ?, ?, ?)')
             .run(uuidv4(), finding.endpoint, finding.mutation_type, finding.baseline_status, finding.mutated_status, finding.evidence, finding.confidence);
         }
-      } catch (err) {
-        // Ignore timeout or connection errors for mutations
+      } catch {
+        // Connection / timeout errors on mutations carry no signal
       }
     }
 

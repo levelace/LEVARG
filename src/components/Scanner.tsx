@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, Play, AlertCircle, CheckCircle2, Terminal, RefreshCw, Wand2, ChevronDown, ChevronUp } from 'lucide-react';
+import SessionSelector from './SessionSelector';
 
 export default function Scanner({ initialUrl }: { initialUrl?: string }) {
   const [payloads, setPayloads] = useState<any[]>([]);
@@ -11,6 +12,7 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
   const [payloadSetId, setPayloadSetId] = useState('');
   const [method, setMethod] = useState('GET');
   const [loading, setLoading] = useState(false);
+  const [sessionId, setSessionId] = useState('');
   const [fuzzableDiscoveries, setFuzzableDiscoveries] = useState<any[]>([]);
   const [showDiscoveries, setShowDiscoveries] = useState(false);
 
@@ -68,7 +70,8 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
           payloadSetId,
           method,
           headers: { "User-Agent": "LevarG-Scanner/1.0" },
-          body: ""
+          body: "",
+          sessionId: sessionId || undefined
         })
       });
       const data = await res.json();
@@ -184,6 +187,9 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
               <Play className="w-4 h-4 relative z-10" /> <span className="relative z-10">Start Scan</span>
             </button>
           </div>
+        </div>
+        <div className="mt-3">
+          <SessionSelector value={sessionId} onChange={setSessionId} />
         </div>
       </div>
 
