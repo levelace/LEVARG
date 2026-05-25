@@ -331,7 +331,7 @@ export default function AutomationDashboard() {
             ) : (
               <div className="space-y-6">
                 {/* Job Summary Bar */}
-                <div className="grid grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                   <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner relative overflow-hidden">
                     <div className="absolute top-0 left-0 w-full h-[1px] bg-emerald-500/30" />
                     <div className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest mb-1">Target</div>
@@ -394,7 +394,7 @@ export default function AutomationDashboard() {
                               {pr?.tools && pr.tools.length > 0 && (
                                 <div>
                                   <div className="text-[9px] font-mono text-emerald-500/60 uppercase tracking-widest mb-2">Tools</div>
-                                  <div className="grid grid-cols-2 gap-2">
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                     {pr.tools.map((tool, idx) => (
                                       <div key={idx} className="flex items-center gap-2 p-2 bg-black/40 border border-emerald-900/20 rounded">
                                         {toolStatusIcon(tool.status)}

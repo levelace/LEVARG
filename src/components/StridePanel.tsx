@@ -292,7 +292,7 @@ export default function StridePanel() {
 
       {/* STRIDE Category Summary Cards */}
       {summary && summary.total > 0 && (
-        <div className="grid grid-cols-6 gap-2 px-4 py-3 border-b border-emerald-900/20 shrink-0">
+        <div className="grid grid-cols-3 md:grid-cols-6 gap-2 px-4 py-3 border-b border-emerald-900/20 shrink-0">
           {CATEGORIES.map(cat => {
             const data = summary.byCategory[cat.key];
             const count = data?.total ?? 0;
@@ -348,7 +348,7 @@ export default function StridePanel() {
       {/* Create Form */}
       {showForm && (
         <div className="mx-4 mt-2 p-3 bg-gray-900/80 border border-emerald-900/40 rounded-lg shrink-0">
-          <div className="grid grid-cols-2 gap-2 mb-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
             <div>
               <label className="block text-[10px] text-gray-500 mb-1">Category *</label>
               <select value={formCategory} onChange={e => setFormCategory(e.target.value)}
@@ -376,7 +376,7 @@ export default function StridePanel() {
               placeholder="Detailed threat description…"
               className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300 resize-none" />
           </div>
-          <div className="grid grid-cols-2 gap-2 mb-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
             <div>
               <label className="block text-[10px] text-gray-500 mb-1">Affected Asset</label>
               <input value={formAsset} onChange={e => setFormAsset(e.target.value)}
@@ -390,7 +390,7 @@ export default function StridePanel() {
                 className="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-300" />
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-2 mb-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
             <div>
               <label className="block text-[10px] text-gray-500 mb-1">Scope</label>
               <select value={formScopeId} onChange={e => setFormScopeId(e.target.value)}

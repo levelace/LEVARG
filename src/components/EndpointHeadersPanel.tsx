@@ -157,7 +157,7 @@ export default function EndpointHeadersPanel() {
             <span className="text-emerald-300 font-bold">{editingId ? 'Edit Rule' : 'New Header Rule'}</span>
             <button onClick={() => { setAdding(false); setEditingId(null); }} className="text-zinc-500 hover:text-zinc-300"><X className="w-4 h-4" /></button>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <label className="text-[11px] text-emerald-400/70 uppercase tracking-wider">
               URL Pattern (regex or glob)
               <input

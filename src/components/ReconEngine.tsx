@@ -193,10 +193,10 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
         <span className="text-[10px] font-mono text-emerald-500/50 self-center">{filtered.length}/{endpoints.length}</span>
       </div>
 
-      <div className="cyber-card">
+      <div className="cyber-card overflow-x-auto">
         <div className="absolute top-0 right-0 w-[300px] h-[300px] bg-emerald-500/5 blur-[100px] rounded-full pointer-events-none" />
         
-        <div className="grid grid-cols-12 gap-4 p-4 border-b border-emerald-900/30 bg-emerald-950/20 rounded-t-lg text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 relative z-10">
+        <div className="grid grid-cols-12 gap-4 p-4 border-b border-emerald-900/30 bg-emerald-950/20 rounded-t-lg text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 relative z-10 min-w-[640px]">
           <div className="col-span-1">Method</div>
           <div className="col-span-6">Endpoint URL</div>
           <div className="col-span-2">Source</div>
@@ -211,7 +211,7 @@ export default function ReconEngine({ onSendToRepeater, onSendToFuzzer, onSendTo
             </div>
           ) : (
             filtered.map((ep) => (
-              <div key={ep.id} className="grid grid-cols-12 gap-4 p-4 items-center hover:bg-emerald-900/10 transition-colors group">
+              <div key={ep.id} className="grid grid-cols-12 gap-4 p-4 items-center hover:bg-emerald-900/10 transition-colors group min-w-[640px]">
                 <div className="col-span-1">
                   <span className={cn(
                     "text-[10px] font-mono px-2 py-1 rounded-sm border shadow-[0_0_5px_rgba(0,0,0,0.2)]",

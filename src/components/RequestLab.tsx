@@ -141,7 +141,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
   return (
     <div className="h-full flex flex-col w-full bg-black/40 backdrop-blur-md relative overflow-hidden">
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
-      <header className="p-6 border-b border-emerald-900/30 flex justify-between items-center bg-black/50 relative z-10 shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
+      <header className="p-4 md:p-6 border-b border-emerald-900/30 flex flex-wrap justify-between items-center gap-3 bg-black/50 relative z-10 shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
         <div className="absolute left-0 top-0 w-1 h-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]" />
         <div className="pl-4">
           <h2 className="text-2xl font-bold tracking-tight text-emerald-50 flex items-center gap-3 drop-shadow-[0_0_10px_rgba(16,185,129,0.3)]">
@@ -199,9 +199,9 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
         </div>
       </header>
 
-      <div className="flex-1 grid grid-cols-12 overflow-hidden relative z-10">
+      <div className="flex-1 flex flex-col md:grid md:grid-cols-12 overflow-hidden relative z-10">
         {/* History Sidebar */}
-        <div className="col-span-2 border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/30 backdrop-blur-sm">
+        <div className="hidden md:flex md:col-span-2 border-r border-emerald-900/30 flex-col overflow-hidden bg-black/30 backdrop-blur-sm">
           <div className="p-3 bg-black/50 border-b border-emerald-900/30 text-[10px] font-mono text-emerald-500/70 uppercase tracking-wider flex items-center gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <History className="w-3 h-3" /> History
           </div>
@@ -245,7 +245,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
         </div>
 
         {/* Request Panel */}
-        <div className="col-span-5 border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/40 backdrop-blur-md">
+        <div className="flex-1 md:col-span-5 border-b md:border-b-0 md:border-r border-emerald-900/30 flex flex-col overflow-hidden bg-black/40 backdrop-blur-md">
           <div className="p-3 bg-black/50 border-b border-emerald-900/30 flex gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <select
               value={method}
@@ -288,7 +288,7 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
         </div>
 
         {/* Response Panel */}
-        <div className="col-span-5 flex flex-col overflow-hidden bg-black/30 backdrop-blur-sm">
+        <div className="flex-1 md:col-span-5 flex flex-col overflow-hidden bg-black/30 backdrop-blur-sm">
           {error && (
             <div className="p-4 bg-red-500/10 border-b border-red-500/30 text-red-400 flex items-center gap-2 text-xs font-mono shadow-[0_2px_10px_rgba(239,68,68,0.1)]">
               <AlertCircle className="w-4 h-4" />

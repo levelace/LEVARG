@@ -133,8 +133,8 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
       </header>
 
       <div className="bg-black/50 border border-emerald-900/30 p-6 mb-8 rounded-lg shadow-[0_4px_20px_rgba(0,0,0,0.3)] relative z-10">
-        <div className="grid grid-cols-12 gap-4 items-end">
-          <div className="col-span-2 relative group">
+        <div className="grid grid-cols-2 md:grid-cols-12 gap-4 items-end">
+          <div className="col-span-1 md:col-span-2 relative group">
             <div className="absolute inset-0 bg-[linear-gradient(45deg,transparent_25%,rgba(16,185,129,0.05)_50%,transparent_75%)] bg-[length:250%_250%,100%_100%] animate-[shimmer_2s_infinite_linear] pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity rounded-md" />
             <label className="block text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 mb-2">Method</label>
             <select
@@ -227,7 +227,7 @@ export default function Scanner({ initialUrl }: { initialUrl?: string }) {
         </div>
       </div>
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-6 overflow-hidden min-h-0 relative z-10">
+      <div className="flex-1 grid grid-cols-1 md:grid-cols-1 lg:grid-cols-3 gap-6 overflow-hidden min-h-0 relative z-10">
         {/* Scan History */}
         <div className="lg:col-span-1 bg-black/40 backdrop-blur-md border border-emerald-900/30 rounded-lg flex flex-col overflow-hidden shadow-[0_4px_20px_rgba(0,0,0,0.3)]">
           <div className="p-4 bg-black/50 border-b border-emerald-900/30 text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 flex justify-between items-center shadow-[0_2px_10px_rgba(0,0,0,0.2)]">

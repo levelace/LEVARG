@@ -104,7 +104,7 @@ export default function SubdomainPanel() {
   };
 
   return (
-    <div className="p-8 max-w-7xl mx-auto h-full flex flex-col w-full overflow-y-auto scrollbar-hide relative">
+    <div className="p-4 md:p-8 max-w-7xl mx-auto h-full flex flex-col w-full overflow-y-auto scrollbar-hide relative">
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
       <header className="mb-8 relative">
         <div className="absolute -left-4 top-1/2 -translate-y-1/2 w-1 h-12 bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,1)]" />
@@ -120,7 +120,7 @@ export default function SubdomainPanel() {
       {/* Input Controls */}
       <div className="cyber-card p-6 mb-6">
         <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-emerald-500/30 to-transparent" />
-        <div className="flex gap-4 items-end relative z-10">
+        <div className="flex flex-col md:flex-row gap-4 items-stretch md:items-end relative z-10">
           <div className="flex-1">
             <label className="block text-[10px] uppercase font-mono tracking-widest text-emerald-500/70 mb-2">Target Domain</label>
             <input type="text" value={domain} onChange={e => setDomain(e.target.value)} placeholder="example.com" className="cyber-input w-full" />
@@ -153,7 +153,7 @@ export default function SubdomainPanel() {
 
       {/* Tool Stats */}
       {enumData && (
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
           {[
             { label: 'Subfinder', ...enumData.tools.subfinder, color: 'cyan' },
             { label: 'Brute-Force', ...enumData.tools.bruteforce, color: 'emerald' },
@@ -207,7 +207,7 @@ export default function SubdomainPanel() {
 
           <div className="flex-1 overflow-y-auto scrollbar-hide p-4">
             {viewMode === 'grid' ? (
-              <div className="grid grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filtered.map((r, i) => (
                   <div key={i} className={`bg-black/40 border rounded-lg overflow-hidden hover:bg-emerald-950/20 transition-colors ${statusBg(r.status)}`}>
                     {r.screenshotPath ? (

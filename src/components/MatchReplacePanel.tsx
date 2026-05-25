@@ -179,7 +179,7 @@ export default function MatchReplacePanel() {
             <button onClick={() => { setAdding(false); setEditingId(null); setForm(emptyForm); }}
               className="text-zinc-500 hover:text-zinc-300"><X className="w-4 h-4" /></button>
           </div>
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
             <label className="text-[11px] text-emerald-400/70 uppercase tracking-wider">
               Name
               <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
@@ -202,7 +202,7 @@ export default function MatchReplacePanel() {
               </select>
             </label>
           </div>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <label className="text-[11px] text-emerald-400/70 uppercase tracking-wider">
               Match Pattern
               <input value={form.matchPattern} onChange={(e) => setForm({ ...form, matchPattern: e.target.value })}
@@ -216,7 +216,7 @@ export default function MatchReplacePanel() {
                 className="mt-1 w-full bg-black border border-emerald-900/50 px-2 py-1 rounded text-emerald-100 font-mono text-xs" />
             </label>
           </div>
-          <div className="grid grid-cols-4 gap-3 items-end">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 items-end">
             <label className="text-[11px] text-emerald-400/70 uppercase tracking-wider">
               Priority (lower = first)
               <input type="number" value={form.priority} onChange={(e) => setForm({ ...form, priority: parseInt(e.target.value) || 0 })}

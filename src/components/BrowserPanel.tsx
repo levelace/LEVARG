@@ -212,8 +212,8 @@ export default function BrowserPanel() {
         <h3 className="text-[10px] font-mono uppercase tracking-[0.2em] font-bold text-emerald-500/70 mb-4">
           Launch Configuration
         </h3>
-        <div className="grid grid-cols-12 gap-4 items-end">
-          <div className="col-span-6">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end">
+          <div className="md:col-span-6">
             <label className="text-[10px] font-mono uppercase tracking-widest text-emerald-500/70 mb-1 block">
               Bound Scope
             </label>
@@ -318,7 +318,7 @@ export default function BrowserPanel() {
             {status.capturing ? 'Pause Capture' : 'Resume Capture'}
           </button>
         </div>
-        <div className="grid grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatBlock label="Running" value={status.running ? 'YES' : 'NO'} accent={status.running ? 'green' : 'gray'} />
           <StatBlock label="Bound Scope" value={status.scopeDomain || '—'} accent="green" />
           <StatBlock label="Captured" value={String(status.capturedRequests)} accent="green" />
@@ -369,7 +369,7 @@ export default function BrowserPanel() {
           Captures cookies + localStorage / sessionStorage for in-scope hosts only. Cookies bound to identity-provider domains
           (e.g., google.com, okta.com) are excluded — only material for {status.scopeDomain || 'the active scope'} is saved.
         </p>
-        <div className="grid grid-cols-12 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
           <div className="col-span-4">
             <label className="text-[10px] font-mono uppercase tracking-widest text-emerald-500/70 mb-1 block">
               Session Name
