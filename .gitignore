@@ -10,3 +10,8 @@ coverage/
 pocforge.db
 release/
 static/nodejs/server.js
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
