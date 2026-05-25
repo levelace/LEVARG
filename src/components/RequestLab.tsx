@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Play, Save, Copy, Terminal, FlaskConical, AlertCircle, Clock, Database, Sparkles, History, Plus } from 'lucide-react';
+import { Play, Save, Copy, Terminal, FlaskConical, AlertCircle, Clock, Database, Sparkles, History, Plus, Shield } from 'lucide-react';
 import Markdown from 'react-markdown';
 import SessionSelector from './SessionSelector';
 
@@ -18,6 +18,15 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
   const [history, setHistory] = useState<any[]>([]);
   const [historySearch, setHistorySearch] = useState('');
   const [viewMode, setViewMode] = useState<'pretty' | 'raw' | 'split'>('pretty');
+  const [wafBypassEnabled, setWafBypassEnabled] = useState(false);
+  const [wafTechnique, setWafTechnique] = useState('');
+  const [wafTechniques, setWafTechniques] = useState<{name: string; category: string}[]>([]);
+
+  useEffect(() => {
+    fetch('/api/waf/techniques').then(r => r.json()).then(data => {
+      if (data.techniques) setWafTechniques(data.techniques);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (initialRequest) {
@@ -74,7 +83,8 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
           url,
           headers: JSON.parse(headers),
           body: body ? (method === 'GET' ? undefined : body) : undefined,
-          sessionId: sessionId || undefined
+          sessionId: sessionId || undefined,
+          wafBypass: wafBypassEnabled ? { enabled: true, technique: wafTechnique || undefined } : undefined
         })
       });
       const data = await res.json();
@@ -141,6 +151,30 @@ export default function RequestLab({ initialRequest }: { initialRequest?: any })
           <p className="text-[10px] text-emerald-500/70 font-mono uppercase tracking-widest mt-1">Raw HTTP Manipulation & Replay</p>
         </div>
         <div className="flex gap-4 items-center">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setWafBypassEnabled(!wafBypassEnabled)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono uppercase tracking-wider rounded border transition-all ${
+                wafBypassEnabled ? 'bg-amber-500/20 border-amber-500/50 text-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.2)]' : 'bg-black/50 border-emerald-900/50 text-emerald-500/50 hover:text-emerald-400'
+              }`}
+              title="Apply WAF bypass encoding to request"
+            >
+              <Shield className="w-3 h-3" />
+              WAF Bypass {wafBypassEnabled ? 'ON' : 'OFF'}
+            </button>
+            {wafBypassEnabled && wafTechniques.length > 0 && (
+              <select
+                value={wafTechnique}
+                onChange={e => setWafTechnique(e.target.value)}
+                className="cyber-input text-[10px] py-1 px-2 w-40"
+              >
+                <option value="">Auto (best match)</option>
+                {wafTechniques.map(t => (
+                  <option key={t.name} value={t.name}>{t.name} ({t.category})</option>
+                ))}
+              </select>
+            )}
+          </div>
           <SessionSelector value={sessionId} onChange={setSessionId} />
           {response && (
             <button

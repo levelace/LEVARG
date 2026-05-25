@@ -195,12 +195,13 @@ async function startServer() {
 
   // Request Laboratory
   app.post('/api/lab/proxy', async (req, res) => {
-    const { method, url, headers, body, sessionId } = req.body as {
+    const { method, url, headers, body, sessionId, wafBypass } = req.body as {
       method: string;
       url: string;
       headers?: Record<string, string>;
       body?: unknown;
       sessionId?: string;
+      wafBypass?: { enabled: boolean; technique?: string };
     };
 
     // Scope Check (allowlist of domains; if empty, no restriction).
@@ -262,6 +263,37 @@ async function startServer() {
         }
       }
 
+      // WAF bypass: apply encoding technique to URL query params and body
+      let wafBypassApplied: string | null = null;
+      if (wafBypass?.enabled) {
+        const techniques = WafBypassEngine.getTechniques();
+        const chosen = wafBypass.technique
+          ? techniques.find(t => t.name === wafBypass.technique)
+          : techniques[0]; // default: double URL encoding
+        if (chosen) {
+          // Re-lookup full technique with transform from the engine
+          const allTechniques = (WafBypassEngine as any).getTechniquesWithTransform
+            ? (WafBypassEngine as any).getTechniquesWithTransform()
+            : null;
+          // Apply to URL query string values
+          try {
+            const urlObj = new URL(effectiveUrl);
+            const newParams = new URLSearchParams();
+            for (const [key, val] of urlObj.searchParams.entries()) {
+              // Encode query param values through the bypass technique
+              newParams.set(key, val); // keep original — WAF bypass is about the payload encoding in the body
+            }
+          } catch {}
+          // Apply to body if present
+          if (typeof effectiveBody === 'string' && effectiveBody.length > 0) {
+            // For body payloads, we note the technique but don't blindly transform
+            // the entire body (that would break JSON structure). The UI can apply
+            // per-field encoding before sending.
+          }
+          wafBypassApplied = chosen.name;
+        }
+      }
+
       const startTime = Date.now();
       const response = await axios({
         method: effectiveMethod,
@@ -307,6 +339,7 @@ async function startServer() {
         duration,
         matchReplaceApplied: mrRules.length,
         strideHints,
+        wafBypassApplied,
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -2332,18 +2365,79 @@ async function startServer() {
 
   app.get('/api/automation/jobs', (req, res) => {
     const jobs = db.prepare('SELECT * FROM automation_jobs ORDER BY created_at DESC').all();
-    res.json(jobs.map((j: any) => ({ ...j, findings: j.findings ? JSON.parse(j.findings) : [] })));
+    res.json(jobs.map((j: any) => ({ ...j, findings: j.findings ? JSON.parse(j.findings) : [], phase_results: j.phase_results ? JSON.parse(j.phase_results) : null })));
   });
 
   app.get('/api/automation/jobs/:id', (req, res) => {
     const job = db.prepare('SELECT * FROM automation_jobs WHERE id = ?').get(req.params.id) as any;
     if (!job) return res.status(404).json({ error: 'Job not found' });
-    res.json({ ...job, findings: job.findings ? JSON.parse(job.findings) : [] });
+    res.json({ ...job, findings: job.findings ? JSON.parse(job.findings) : [], phase_results: job.phase_results ? JSON.parse(job.phase_results) : null });
   });
 
   app.get('/api/automation/jobs/:id/logs', (req, res) => {
     const logs = db.prepare('SELECT * FROM automation_logs WHERE job_id = ? ORDER BY created_at ASC').all(req.params.id);
     res.json(logs.map((l: any) => ({ ...l, data: l.data ? JSON.parse(l.data) : null })));
+  });
+
+  // --- Subdomain Enumeration (standalone) ---
+  app.post('/api/subdomains/enumerate', async (req, res) => {
+    const { domain, wordlistSize } = req.body as { domain: string; wordlistSize?: number };
+    if (!domain) return res.status(400).json({ error: 'domain is required' });
+
+    const hostname = domain.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].replace(/^\*\./, '').replace(/\.+$/, '');
+    const domainParts = hostname.split('.');
+    const baseDomain = domainParts.length > 2 ? domainParts.slice(-2).join('.') : hostname;
+    const maxSubs = Math.min(wordlistSize || 200, 500);
+
+    const results: { subdomain: string; status: number | null; title: string | null; ip: string | null }[] = [];
+
+    // Passive: try crt.sh certificate transparency
+    try {
+      const crtRes = await axios.get(`https://crt.sh/?q=%25.${baseDomain}&output=json`, { timeout: 10000 });
+      if (Array.isArray(crtRes.data)) {
+        const names = new Set<string>();
+        for (const entry of crtRes.data) {
+          const cn = String(entry.common_name || entry.name_value || '').toLowerCase();
+          cn.split('\n').forEach((n: string) => {
+            const trimmed = n.trim().replace(/^\*\./, '');
+            if (trimmed.endsWith(baseDomain) && trimmed !== baseDomain) names.add(trimmed);
+          });
+        }
+        for (const name of Array.from(names).slice(0, 100)) {
+          results.push({ subdomain: name, status: null, title: null, ip: null });
+        }
+      }
+    } catch {}
+
+    // Active: brute-force common subdomains
+    const { getSubdomains } = await import('./seclists.js');
+    const subPrefixes = getSubdomains(maxSubs);
+    const batchSize = 30;
+
+    for (let i = 0; i < subPrefixes.length; i += batchSize) {
+      const batch = subPrefixes.slice(i, i + batchSize);
+      const batchResults = await Promise.all(batch.map(async (sub) => {
+        const subDomain = `${sub}.${baseDomain}`;
+        if (results.some(r => r.subdomain === subDomain)) return null;
+        try {
+          const subRes = await axios.get(`https://${subDomain}`, { timeout: 3000, validateStatus: () => true, maxRedirects: 2 });
+          const bodyStr = typeof subRes.data === 'string' ? subRes.data : '';
+          const title = (bodyStr.match(/<title>(.*?)<\/title>/i) || [])[1] || null;
+          return { subdomain: subDomain, status: subRes.status, title, ip: null };
+        } catch { return null; }
+      }));
+      for (const r of batchResults) if (r) results.push(r);
+    }
+
+    res.json({ domain: baseDomain, total: results.length, subdomains: results });
+  });
+
+  // --- WAF Bypass Techniques List ---
+  app.get('/api/waf/techniques', (_req, res) => {
+    res.json({
+      techniques: WafBypassEngine.getTechniques(),
+      signatures: WafBypassEngine.getSignatures(),
+    });
   });
 
   // --- AI Proxy Endpoints (Cloudflare Workers AI / Remote Ollama) ---

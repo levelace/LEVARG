@@ -241,6 +241,12 @@ if (!hasPhase) {
   db.exec("ALTER TABLE automation_jobs ADD COLUMN phase TEXT");
 }
 
+// Migration: Add 'phase_results' column — stores per-phase structured results
+const hasPhaseResults = tableInfo.some((col: any) => col.name === 'phase_results');
+if (!hasPhaseResults) {
+  db.exec("ALTER TABLE automation_jobs ADD COLUMN phase_results TEXT"); // JSON
+}
+
 // --- Performance indexes ---
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_requests_created ON requests(created_at DESC);

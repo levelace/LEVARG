@@ -35,6 +35,7 @@ import OriginIpPanel from './components/OriginIpPanel';
 import EndpointHeadersPanel from './components/EndpointHeadersPanel';
 import MatchReplacePanel from './components/MatchReplacePanel';
 import StridePanel from './components/StridePanel';
+import SubdomainPanel from './components/SubdomainPanel';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -46,7 +47,7 @@ type View =
   | 'identity' | 'browser' | 'sessions' | 'credentials' | 'authflows' | 'osbridge'
   | 'automation' | 'lab' | 'scanner' | 'stackgap' | 'flows' | 'waf' | 'originip'
   | 'encoder' | 'payloads' | 'endpointheaders' | 'matchreplace'
-  | 'stride'
+  | 'stride' | 'subdomains'
   | 'history'
   | 'about';
 
@@ -71,6 +72,7 @@ const NAV_SECTIONS: NavSection[] = [
     items: [
       { id: 'scope', label: 'Scope Control', icon: Shield },
       { id: 'recon', label: 'Recon Engine', icon: Search },
+      { id: 'subdomains', label: 'Subdomain Enum', icon: Globe },
     ],
   },
   {
@@ -413,6 +415,7 @@ export default function App() {
               {activeView === 'stackgap' && <StackGapAnalyzer />}
               {activeView === 'waf' && <WafPanel />}
               {activeView === 'originip' && <OriginIpPanel />}
+              {activeView === 'subdomains' && <SubdomainPanel />}
               {activeView === 'flows' && <FlowCapture />}
 
               {activeView === 'encoder' && <Encoder initialText={encoderTarget} />}

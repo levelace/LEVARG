@@ -1,6 +1,22 @@
 import React, { useState, useEffect } from 'react';
-import { Play, CheckCircle2, XCircle, Clock, Download, FileJson, FileText, FileCode2, Terminal, AlertCircle, Activity } from 'lucide-react';
+import { Play, CheckCircle2, XCircle, Clock, Download, FileJson, FileText, FileCode2, Terminal, AlertCircle, Activity, ChevronDown, ChevronRight, Shield, Search, Globe, Zap, Eye, Lock, BarChart3, Wrench } from 'lucide-react';
 import SessionSelector from './SessionSelector';
+
+interface PhaseResult {
+  status: 'completed' | 'failed' | 'skipped';
+  findings: number;
+  tools: { name: string; status: 'ok' | 'failed' | 'skipped'; detail?: string }[];
+  data?: Record<string, unknown>;
+  timestamp?: string;
+}
+
+const PHASE_META: Record<string, { label: string; description: string; icon: React.ComponentType<{ className?: string }> }> = {
+  phase1: { label: 'Phase 1: Reconnaissance', description: 'Subdomain discovery, port scanning, asset enumeration', icon: Search },
+  phase2: { label: 'Phase 2: Fingerprinting', description: 'HTTP fingerprinting, tech stack detection', icon: Eye },
+  phase3: { label: 'Phase 3: Discovery', description: 'Active crawling, endpoint discovery, sensitive file probing', icon: Globe },
+  phase4: { label: 'Phase 4: Exploitation', description: 'Fuzzing, 0day discovery, UEBA, WAF bypass, auth deep dive', icon: Zap },
+  phase5: { label: 'Phase 5: Reporting', description: 'Final synthesis, PoC generation, vulnerability summary', icon: BarChart3 },
+};
 
 export default function AutomationDashboard() {
   const [targetUrl, setTargetUrl] = useState('');
@@ -11,6 +27,8 @@ export default function AutomationDashboard() {
   const [logFilter, setLogFilter] = useState<'all' | 'info' | 'warn' | 'vuln'>('all');
   const [error, setError] = useState('');
   const [sessionId, setSessionId] = useState('');
+  const [expandedPhases, setExpandedPhases] = useState<Set<string>>(new Set());
+  const [activeTab, setActiveTab] = useState<'phases' | 'logs' | 'findings'>('phases');
 
   const fetchJobs = async () => {
     try {
@@ -18,7 +36,6 @@ export default function AutomationDashboard() {
       const data = await res.json();
       setJobs(data);
       
-      // Update selected job if it's running
       if (selectedJob && selectedJob.status === 'running') {
         const updated = data.find((j: any) => j.id === selectedJob.id);
         if (updated) setSelectedJob(updated);
@@ -135,6 +152,53 @@ export default function AutomationDashboard() {
     URL.revokeObjectURL(url);
   };
 
+  const togglePhase = (phaseId: string) => {
+    setExpandedPhases(prev => {
+      const next = new Set(prev);
+      if (next.has(phaseId)) next.delete(phaseId);
+      else next.add(phaseId);
+      return next;
+    });
+  };
+
+  const phaseResults: Record<string, PhaseResult> | null = selectedJob?.phase_results ?? null;
+
+  const getPhaseStatus = (phaseId: string): 'completed' | 'running' | 'pending' | 'failed' => {
+    if (phaseResults?.[phaseId]) return phaseResults[phaseId].status === 'completed' ? 'completed' : 'failed';
+    if (selectedJob?.status === 'completed') return 'completed';
+    if (selectedJob?.status === 'failed') return 'failed';
+    // Infer from current phase
+    const phaseNum = parseInt(phaseId.replace('phase', ''));
+    const currentPhaseMatch = selectedJob?.phase?.match(/\d+/);
+    const currentNum = currentPhaseMatch ? parseInt(currentPhaseMatch[0]) : 0;
+    if (currentNum > phaseNum) return 'completed';
+    if (currentNum === phaseNum) return 'running';
+    return 'pending';
+  };
+
+  const toolStatusIcon = (status: 'ok' | 'failed' | 'skipped') => {
+    if (status === 'ok') return <CheckCircle2 className="w-3 h-3 text-emerald-400" />;
+    if (status === 'failed') return <XCircle className="w-3 h-3 text-red-400" />;
+    return <Clock className="w-3 h-3 text-gray-500" />;
+  };
+
+  const phaseStatusColor = (status: string) => {
+    if (status === 'completed') return 'text-emerald-400 bg-emerald-500/10 border-emerald-500/30';
+    if (status === 'running') return 'text-amber-400 bg-amber-500/10 border-amber-500/30';
+    if (status === 'failed') return 'text-red-400 bg-red-500/10 border-red-500/30';
+    return 'text-gray-500 bg-gray-500/10 border-gray-500/30';
+  };
+
+  // Get findings for a specific phase
+  const getFindingsForPhase = (phaseId: string) => {
+    if (!selectedJob?.findings) return [];
+    const phaseNum = phaseId.replace('phase', '');
+    return selectedJob.findings.filter((f: any) => {
+      const fp = String(f.phase || '').replace('Phase ', '');
+      return fp === phaseNum || fp.startsWith(`${phaseNum}.`) || fp.startsWith(`${phaseNum}:`) || fp === `Phase ${phaseNum}`;
+    });
+  };
+
   return (
     <div className="p-8 max-w-6xl mx-auto h-full flex flex-col w-full overflow-y-auto scrollbar-hide relative">
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_50%_0%,rgba(16,185,129,0.05)_0%,transparent_50%)]" />
@@ -144,7 +208,7 @@ export default function AutomationDashboard() {
           <Terminal className="w-8 h-8 text-emerald-400" />
           Auto-Hunter
         </h2>
-        <p className="text-xs text-emerald-500/70 font-mono mt-2 uppercase tracking-widest">Automated Recon, Fingerprinting, and Fuzzing Workflow</p>
+        <p className="text-xs text-emerald-500/70 font-mono mt-2 uppercase tracking-widest">Automated Recon, Fingerprinting, WAF Bypass, and Fuzzing Workflow</p>
       </header>
 
       <div className="cyber-card p-6 mb-8">
@@ -185,6 +249,7 @@ export default function AutomationDashboard() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
+        {/* Job History Sidebar */}
         <div className="lg:col-span-1 cyber-card flex flex-col">
           <div className="p-4 bg-emerald-950/20 border-b border-emerald-900/30 text-[10px] uppercase font-mono tracking-widest text-emerald-400/80 flex items-center gap-2 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
             <Activity className="w-3 h-3" /> Job History
@@ -198,7 +263,7 @@ export default function AutomationDashboard() {
               jobs.map(job => (
                 <button
                   key={job.id}
-                  onClick={() => setSelectedJob(job)}
+                  onClick={() => { setSelectedJob(job); setActiveTab('phases'); }}
                   className={`w-full text-left p-3 rounded-md border transition-all ${selectedJob?.id === job.id ? 'bg-emerald-900/30 border-emerald-500/50 shadow-[0_0_10px_rgba(16,185,129,0.1)]' : 'bg-black/40 border-emerald-900/20 hover:border-emerald-700/50 hover:bg-emerald-950/30'}`}
                 >
                   <div className="flex justify-between items-start mb-2">
@@ -211,19 +276,36 @@ export default function AutomationDashboard() {
                     <span>{new Date(job.created_at).toLocaleTimeString()}</span>
                     <span>{job.status}</span>
                   </div>
+                  {job.phase_results && (
+                    <div className="mt-1 flex gap-1">
+                      {Object.entries(job.phase_results).map(([id, pr]: [string, any]) => (
+                        <div key={id} className={`w-2 h-2 rounded-full ${pr.status === 'completed' ? 'bg-emerald-500' : pr.status === 'failed' ? 'bg-red-500' : 'bg-gray-500'}`} title={`${PHASE_META[id]?.label || id}: ${pr.findings} findings`} />
+                      ))}
+                    </div>
+                  )}
                 </button>
               ))
             )}
           </div>
         </div>
 
+        {/* Main Content Panel */}
         <div className="lg:col-span-2 cyber-card flex flex-col">
-          <div className="absolute top-0 right-0 w-[300px] h-[300px] bg-emerald-500/5 blur-[100px] rounded-full pointer-events-none" />
-          
           <div className="p-4 bg-emerald-950/20 border-b border-emerald-900/30 flex justify-between items-center relative z-10 shadow-[0_2px_10px_rgba(0,0,0,0.2)]">
-            <span className="text-[10px] uppercase font-mono tracking-widest text-emerald-400/80 flex items-center gap-2">
-              <Terminal className="w-3 h-3" /> Job Details & Findings
-            </span>
+            <div className="flex items-center gap-4">
+              <span className="text-[10px] uppercase font-mono tracking-widest text-emerald-400/80 flex items-center gap-2">
+                <Terminal className="w-3 h-3" /> Job Details
+              </span>
+              {selectedJob && (
+                <div className="flex gap-1">
+                  {(['phases', 'logs', 'findings'] as const).map(tab => (
+                    <button key={tab} onClick={() => setActiveTab(tab)} className={`text-[9px] font-mono uppercase px-2 py-1 rounded border transition-all ${activeTab === tab ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400' : 'bg-black/40 border-emerald-900/50 text-emerald-500/50 hover:text-emerald-400'}`}>
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             
             {selectedJob && selectedJob.status === 'completed' && (
               <div className="flex gap-2">
@@ -248,7 +330,8 @@ export default function AutomationDashboard() {
               </div>
             ) : (
               <div className="space-y-6">
-                <div className="grid grid-cols-2 gap-4">
+                {/* Job Summary Bar */}
+                <div className="grid grid-cols-3 gap-4">
                   <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner relative overflow-hidden">
                     <div className="absolute top-0 left-0 w-full h-[1px] bg-emerald-500/30" />
                     <div className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest mb-1">Target</div>
@@ -257,144 +340,207 @@ export default function AutomationDashboard() {
                   <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner relative overflow-hidden">
                     <div className="absolute top-0 left-0 w-full h-[1px] bg-emerald-500/30" />
                     <div className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest mb-1">Status</div>
-                    <div className={`text-sm font-mono uppercase tracking-wider font-bold ${selectedJob.status === 'running' ? 'text-amber-400 drop-shadow-[0_0_5px_rgba(251,191,36,0.5)]' : selectedJob.status === 'completed' ? 'text-emerald-400 drop-shadow-[0_0_5px_rgba(16,185,129,0.5)]' : 'text-red-400 drop-shadow-[0_0_5px_rgba(239,68,68,0.5)]'}`}>
+                    <div className={`text-sm font-mono uppercase tracking-wider font-bold ${selectedJob.status === 'running' ? 'text-amber-400' : selectedJob.status === 'completed' ? 'text-emerald-400' : 'text-red-400'}`}>
                       {selectedJob.status} {selectedJob.phase && `(${selectedJob.phase})`}
                     </div>
                   </div>
+                  <div className="p-3 bg-black/50 border border-emerald-900/30 rounded-md shadow-inner relative overflow-hidden">
+                    <div className="absolute top-0 left-0 w-full h-[1px] bg-emerald-500/30" />
+                    <div className="text-[10px] font-mono text-emerald-500/60 uppercase tracking-widest mb-1">Findings</div>
+                    <div className="text-sm font-mono text-emerald-100">{selectedJob.findings?.length || 0} total</div>
+                  </div>
                 </div>
 
-                {/* Intelligence Status */}
-                {selectedJob.status === 'running' && logs.some(l => l.data?.active_intelligence) && (
-                  <div className="p-4 bg-emerald-900/10 border border-emerald-500/20 rounded-md flex gap-4 items-center">
-                    <Activity className="w-5 h-5 text-emerald-400 animate-pulse" />
-                    <div className="flex-1 grid grid-cols-3 gap-2">
-                      {(() => {
-                        const intelLog = [...logs].reverse().find(l => l.data?.active_intelligence);
-                        const intel = intelLog?.data?.active_intelligence;
-                        return (
-                          <>
-                            <div className="text-center">
-                              <div className="text-[8px] uppercase font-mono text-emerald-500/50">Prioritized Targets</div>
-                              <div className="text-xs font-mono text-emerald-300">{intel?.prioritized_targets || 0}</div>
-                            </div>
-                            <div className="text-center border-x border-emerald-500/10">
-                              <div className="text-[8px] uppercase font-mono text-emerald-500/50">Discovered Users</div>
-                              <div className="text-xs font-mono text-emerald-300">{intel?.users || 0}</div>
-                            </div>
-                            <div className="text-center">
-                              <div className="text-[8px] uppercase font-mono text-emerald-500/50">Active Identifiers</div>
-                              <div className="text-xs font-mono text-emerald-300">{intel?.identifiers || 0}</div>
-                            </div>
-                          </>
-                        );
-                      })()}
-                    </div>
-                    <div className="text-[8px] uppercase font-mono text-emerald-400 font-bold tracking-tighter">
-                      Autonomous Chain Active
-                    </div>
-                  </div>
-                )}
+                {/* === PHASES TAB === */}
+                {activeTab === 'phases' && (
+                  <div className="space-y-3">
+                    <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider flex items-center gap-2 border-b border-emerald-900/30 pb-2">
+                      <Wrench className="w-3 h-3" /> Phase Results & Tool Status
+                    </h3>
 
-                {/* Workflow Progress Bar */}
-                <div className="py-4 px-2">
-                  <div className="flex justify-between mb-2">
-                    {['Phase 1', 'Phase 2', 'Phase 3', 'Phase 3.5', 'Phase 4', 'Phase 5'].map((phase, idx) => {
-                      const isCompleted = selectedJob.status === 'completed' || (selectedJob.phase && parseInt(selectedJob.phase.match(/\d+/)?.[0] || '0') > (idx + 1));
-                      const isCurrent = selectedJob.phase?.includes(phase);
+                    {Object.entries(PHASE_META).map(([phaseId, meta]) => {
+                      const status = getPhaseStatus(phaseId);
+                      const pr = phaseResults?.[phaseId] as PhaseResult | undefined;
+                      const phaseFindings = getFindingsForPhase(phaseId);
+                      const isExpanded = expandedPhases.has(phaseId);
+                      const Icon = meta.icon;
+
                       return (
-                        <div key={phase} className="flex flex-col items-center gap-1 w-full relative">
-                          <div className={`w-3 h-3 rounded-full border-2 transition-all ${
-                            isCompleted ? 'bg-emerald-500 border-emerald-400 shadow-[0_0_8px_rgba(16,185,129,1)]' :
-                            isCurrent ? 'bg-amber-500 border-amber-400 animate-pulse' :
-                            'bg-black border-emerald-900/50'
-                          }`} />
-                          <span className={`text-[8px] font-mono uppercase tracking-tighter ${
-                            isCompleted || isCurrent ? 'text-emerald-400' : 'text-emerald-900/50'
-                          }`}>{phase.replace('Phase ', '')}</span>
-                          {idx < 5 && (
-                            <div className={`absolute left-[50%] top-1.5 w-full h-[1px] -z-10 ${
-                              isCompleted ? 'bg-emerald-500' : 'bg-emerald-900/30'
-                            }`} />
+                        <div key={phaseId} className={`border rounded-md overflow-hidden transition-all ${status === 'running' ? 'border-amber-500/40 bg-amber-900/5' : status === 'completed' ? 'border-emerald-900/30 bg-black/30' : status === 'failed' ? 'border-red-900/30 bg-red-900/5' : 'border-gray-800/30 bg-black/20 opacity-50'}`}>
+                          <button onClick={() => togglePhase(phaseId)} className="w-full flex items-center justify-between p-4 hover:bg-emerald-900/10 transition-colors">
+                            <div className="flex items-center gap-3">
+                              {isExpanded ? <ChevronDown className="w-4 h-4 text-emerald-500/50" /> : <ChevronRight className="w-4 h-4 text-emerald-500/50" />}
+                              <Icon className={`w-4 h-4 ${status === 'completed' ? 'text-emerald-400' : status === 'running' ? 'text-amber-400 animate-pulse' : status === 'failed' ? 'text-red-400' : 'text-gray-600'}`} />
+                              <div className="text-left">
+                                <div className="text-xs font-mono text-emerald-100">{meta.label}</div>
+                                <div className="text-[9px] font-mono text-emerald-500/50">{meta.description}</div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              {pr && (
+                                <span className="text-[9px] font-mono text-emerald-500/70">
+                                  {pr.findings} finding{pr.findings !== 1 ? 's' : ''} · {pr.tools.length} tool{pr.tools.length !== 1 ? 's' : ''}
+                                </span>
+                              )}
+                              <span className={`text-[8px] font-mono uppercase px-2 py-0.5 rounded border ${phaseStatusColor(status)}`}>
+                                {status}
+                              </span>
+                            </div>
+                          </button>
+
+                          {isExpanded && (
+                            <div className="border-t border-emerald-900/20 p-4 space-y-3">
+                              {/* Tool Status Grid */}
+                              {pr?.tools && pr.tools.length > 0 && (
+                                <div>
+                                  <div className="text-[9px] font-mono text-emerald-500/60 uppercase tracking-widest mb-2">Tools</div>
+                                  <div className="grid grid-cols-2 gap-2">
+                                    {pr.tools.map((tool, idx) => (
+                                      <div key={idx} className="flex items-center gap-2 p-2 bg-black/40 border border-emerald-900/20 rounded">
+                                        {toolStatusIcon(tool.status)}
+                                        <div className="flex-1 min-w-0">
+                                          <div className="text-[10px] font-mono text-emerald-100 truncate">{tool.name}</div>
+                                          {tool.detail && <div className="text-[9px] font-mono text-emerald-500/50 truncate">{tool.detail}</div>}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Phase Data */}
+                              {pr?.data && Object.keys(pr.data).length > 0 && (
+                                <div>
+                                  <div className="text-[9px] font-mono text-emerald-500/60 uppercase tracking-widest mb-2">Summary</div>
+                                  <div className="flex flex-wrap gap-3">
+                                    {Object.entries(pr.data).map(([key, val]) => (
+                                      <div key={key} className="px-3 py-1.5 bg-black/50 border border-emerald-900/20 rounded text-center">
+                                        <div className="text-[8px] font-mono text-emerald-500/50 uppercase">{key.replace(/([A-Z])/g, ' $1').trim()}</div>
+                                        <div className="text-xs font-mono text-emerald-300">{String(val)}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {/* Phase-specific findings */}
+                              {phaseFindings.length > 0 && (
+                                <div>
+                                  <div className="text-[9px] font-mono text-emerald-500/60 uppercase tracking-widest mb-2">Findings ({phaseFindings.length})</div>
+                                  <div className="space-y-2 max-h-[300px] overflow-y-auto scrollbar-hide">
+                                    {phaseFindings.map((finding: any, idx: number) => (
+                                      <div key={idx} className="p-3 bg-black/50 border border-emerald-900/20 rounded hover:border-emerald-500/30 transition-colors">
+                                        <div className="flex justify-between items-start mb-1">
+                                          <span className="text-[10px] font-mono text-emerald-400 uppercase">{finding.type}</span>
+                                          {finding.data?.length !== undefined && (
+                                            <span className="text-[9px] font-mono text-emerald-500/50">{finding.data.length} items</span>
+                                          )}
+                                        </div>
+                                        <pre className="text-[9px] font-mono text-emerald-100/70 whitespace-pre-wrap overflow-hidden max-h-[100px]">
+                                          {typeof finding.data === 'object' ? JSON.stringify(finding.data, null, 2).substring(0, 500) : String(finding.data || '').substring(0, 500)}
+                                        </pre>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+
+                              {!pr && status === 'pending' && (
+                                <div className="text-[10px] font-mono text-gray-600 italic">Waiting for previous phases to complete...</div>
+                              )}
+                              {status === 'running' && (
+                                <div className="text-[10px] font-mono text-amber-400 flex items-center gap-2">
+                                  <Clock className="w-3 h-3 animate-spin" /> Running...
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
-                      )
+                      );
                     })}
                   </div>
-                </div>
+                )}
 
-                {/* Live Logs */}
-                <div className="flex-1 flex flex-col min-h-[300px]">
-                  <div className="flex justify-between items-center mb-4 border-b border-emerald-900/30 pb-2">
-                    <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider flex items-center gap-2">
-                      <Terminal className="w-3 h-3" /> Live Execution Logs
-                    </h3>
-                    <div className="flex gap-2">
-                      {(['all', 'info', 'warn', 'vuln'] as const).map(f => (
-                        <button
-                          key={f}
-                          onClick={() => setLogFilter(f)}
-                          className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded border transition-all ${
-                            logFilter === f ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400' : 'bg-black/40 border-emerald-900/50 text-emerald-500/50 hover:text-emerald-400'
-                          }`}
-                        >
-                          {f}
-                        </button>
-                      ))}
+                {/* === LOGS TAB === */}
+                {activeTab === 'logs' && (
+                  <div className="flex-1 flex flex-col min-h-[300px]">
+                    <div className="flex justify-between items-center mb-4 border-b border-emerald-900/30 pb-2">
+                      <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider flex items-center gap-2">
+                        <Terminal className="w-3 h-3" /> Live Execution Logs
+                      </h3>
+                      <div className="flex gap-2">
+                        {(['all', 'info', 'warn', 'vuln'] as const).map(f => (
+                          <button
+                            key={f}
+                            onClick={() => setLogFilter(f)}
+                            className={`text-[9px] font-mono uppercase px-1.5 py-0.5 rounded border transition-all ${
+                              logFilter === f ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400' : 'bg-black/40 border-emerald-900/50 text-emerald-500/50 hover:text-emerald-400'
+                            }`}
+                          >
+                            {f}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex-1 bg-black/80 border border-emerald-900/50 rounded-md p-4 font-mono text-[10px] overflow-y-auto space-y-1 scrollbar-hide max-h-[400px]">
-                    {logs.length === 0 ? (
-                      <div className="text-emerald-900/50 italic italic">Waiting for logs...</div>
-                    ) : (
-                      logs.filter(log => logFilter === 'all' || log.level === logFilter).map((log, i) => (
-                        <div key={i} className="flex gap-2">
-                          <span className="text-emerald-900/50">[{new Date(log.created_at).toLocaleTimeString()}]</span>
-                          <span className={`uppercase font-bold ${
-                            log.level === 'vuln' ? 'text-red-400' : 
-                            log.level === 'warn' ? 'text-amber-400' : 
-                            log.level === 'error' ? 'text-red-600' : 'text-emerald-500/70'
-                          }`}>
-                            {log.level}
-                          </span>
-                          <span className="text-emerald-100/80">{log.message}</span>
-                          {log.data && (
-                            <span className="text-emerald-500/40 truncate max-w-[200px]" title={JSON.stringify(log.data)}>
-                              - {JSON.stringify(log.data)}
+                    <div className="flex-1 bg-black/80 border border-emerald-900/50 rounded-md p-4 font-mono text-[10px] overflow-y-auto space-y-1 scrollbar-hide max-h-[500px]">
+                      {logs.length === 0 ? (
+                        <div className="text-emerald-900/50 italic">Waiting for logs...</div>
+                      ) : (
+                        logs.filter(log => logFilter === 'all' || log.level === logFilter).map((log, i) => (
+                          <div key={i} className="flex gap-2">
+                            <span className="text-emerald-900/50 shrink-0">[{new Date(log.created_at).toLocaleTimeString()}]</span>
+                            <span className={`uppercase font-bold shrink-0 ${
+                              log.level === 'vuln' ? 'text-red-400' : 
+                              log.level === 'warn' ? 'text-amber-400' : 
+                              log.level === 'error' ? 'text-red-600' : 'text-emerald-500/70'
+                            }`}>
+                              {log.level}
                             </span>
-                          )}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                {selectedJob.findings && selectedJob.findings.length > 0 && (
-                  <div>
-                    <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider mb-4 border-b border-emerald-900/30 pb-2 flex items-center gap-2">
-                      <Terminal className="w-3 h-3" /> Findings Log
-                    </h3>
-                    <div className="space-y-4">
-                      {selectedJob.findings.map((finding: any, idx: number) => (
-                        <div key={idx} className="p-4 bg-black/50 border border-emerald-900/30 rounded-md hover:border-emerald-500/30 transition-colors group">
-                          <div className="flex justify-between items-start mb-3">
-                            <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-sm border border-emerald-500/30 shadow-[0_0_10px_rgba(16,185,129,0.1)]">
-                              Phase: {finding.phase}
-                            </span>
-                            <span className="text-[10px] font-mono text-emerald-500/70 uppercase tracking-widest">{finding.type}</span>
+                            <span className="text-emerald-100/80">{log.message}</span>
+                            {log.data && (
+                              <span className="text-emerald-500/40 truncate max-w-[200px]" title={JSON.stringify(log.data)}>
+                                - {JSON.stringify(log.data)}
+                              </span>
+                            )}
                           </div>
-                          <pre className="text-[10px] font-mono text-emerald-100/80 whitespace-pre-wrap overflow-x-auto p-3 bg-black/80 rounded border border-emerald-900/50 shadow-inner group-hover:border-emerald-700/50 transition-colors">
-                            {JSON.stringify(finding.data || finding, null, 2)}
-                          </pre>
-                        </div>
-                      ))}
+                        ))
+                      )}
                     </div>
                   </div>
                 )}
-                
-                {selectedJob.status === 'completed' && (!selectedJob.findings || selectedJob.findings.length === 0) && (
-                  <div className="p-8 border border-dashed border-emerald-900/30 bg-black/30 rounded-lg flex flex-col items-center justify-center">
-                    <CheckCircle2 className="w-8 h-8 text-emerald-500/30 mb-4" />
-                    <p className="text-xs font-mono text-emerald-500/50 uppercase tracking-widest">Job completed. No significant findings.</p>
+
+                {/* === FINDINGS TAB === */}
+                {activeTab === 'findings' && (
+                  <div>
+                    {selectedJob.findings && selectedJob.findings.length > 0 ? (
+                      <>
+                        <h3 className="text-xs font-mono text-emerald-300 uppercase tracking-wider mb-4 border-b border-emerald-900/30 pb-2 flex items-center gap-2">
+                          <Shield className="w-3 h-3" /> All Findings ({selectedJob.findings.length})
+                        </h3>
+                        <div className="space-y-4">
+                          {selectedJob.findings.map((finding: any, idx: number) => (
+                            <div key={idx} className="p-4 bg-black/50 border border-emerald-900/30 rounded-md hover:border-emerald-500/30 transition-colors group">
+                              <div className="flex justify-between items-start mb-3">
+                                <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-sm border border-emerald-500/30">
+                                  {finding.phase}
+                                </span>
+                                <span className="text-[10px] font-mono text-emerald-500/70 uppercase tracking-widest">{finding.type}</span>
+                              </div>
+                              <pre className="text-[10px] font-mono text-emerald-100/80 whitespace-pre-wrap overflow-x-auto p-3 bg-black/80 rounded border border-emerald-900/50 shadow-inner">
+                                {JSON.stringify(finding.data || finding, null, 2)}
+                              </pre>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="p-8 border border-dashed border-emerald-900/30 bg-black/30 rounded-lg flex flex-col items-center justify-center">
+                        <CheckCircle2 className="w-8 h-8 text-emerald-500/30 mb-4" />
+                        <p className="text-xs font-mono text-emerald-500/50 uppercase tracking-widest">
+                          {selectedJob.status === 'completed' ? 'Job completed. No significant findings.' : 'Findings will appear here as the hunt progresses.'}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

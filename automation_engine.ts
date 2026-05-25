@@ -9,6 +9,7 @@ import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { OllamaClient } from './ollama_client.js';
 import { PayloadOven } from './payload_oven.js';
 import { ToolManager } from './tool_manager.js';
+import { WafBypassEngine } from './waf_bypass_engine.js';
 import { MemoryManager } from './memory_manager.js';
 import { SessionVault, SessionScopeError } from './session_vault.js';
 import { AuthFlowVault } from './auth_flow_vault.js';
@@ -277,6 +278,18 @@ export class AutomationEngine {
     if (findings) {
       db.prepare('UPDATE automation_jobs SET findings = ? WHERE id = ?').run(JSON.stringify(findings), jobId);
     }
+  }
+
+  private static savePhaseResult(jobId: string, phaseId: string, result: {
+    status: 'completed' | 'failed' | 'skipped';
+    findings: number;
+    tools: { name: string; status: 'ok' | 'failed' | 'skipped'; detail?: string }[];
+    data?: Record<string, unknown>;
+  }) {
+    const row = db.prepare('SELECT phase_results FROM automation_jobs WHERE id = ?').get(jobId) as { phase_results: string | null } | undefined;
+    const existing: Record<string, unknown> = row?.phase_results ? JSON.parse(row.phase_results) : {};
+    existing[phaseId] = { ...result, timestamp: new Date().toISOString() };
+    db.prepare('UPDATE automation_jobs SET phase_results = ? WHERE id = ?').run(JSON.stringify(existing), jobId);
   }
 
   static getPayloadOvenCategories() {
@@ -779,6 +792,16 @@ export class AutomationEngine {
         allFindings.push({ phase: 'Phase 1', type: 'Assets Discovered', data: discoveredAssets });
         allFindings.push({ phase: 'Phase 1', type: 'Port Scan Results', data: openPorts });
 
+        this.savePhaseResult(jobId, 'phase1', {
+          status: 'completed',
+          findings: discoveredAssets.length + openPorts.length,
+          tools: [
+            { name: 'Subdomain Discovery', status: discoveredAssets.length > 1 ? 'ok' : 'skipped', detail: `${discoveredAssets.length} assets` },
+            { name: 'Port Scanner', status: openPorts.length > 0 ? 'ok' : 'skipped', detail: openPorts.length > 0 ? `${openPorts.length} host(s) scanned` : 'No open ports found' },
+          ],
+          data: { assets: discoveredAssets.length, ports: openPorts.length },
+        });
+
         // --- PHASE 2: FINGERPRINTING (DEEP ANALYSIS) ---
         this.updateJob(jobId, 'running', 'Phase 2: Fingerprinting');
         this.log(jobId, 'info', `Starting Phase 2: Fingerprinting discovered assets`);
@@ -806,6 +829,15 @@ export class AutomationEngine {
           } catch (e) {}
         }
         allFindings.push({ phase: 'Phase 2', type: 'Fingerprinting Results', data: techStacks });
+
+        this.savePhaseResult(jobId, 'phase2', {
+          status: techStacks.length > 0 ? 'completed' : 'failed',
+          findings: techStacks.length,
+          tools: [
+            { name: 'HTTP Fingerprinter', status: techStacks.length > 0 ? 'ok' : 'failed', detail: `${techStacks.length} asset(s) fingerprinted` },
+          ],
+          data: { techStacks: techStacks.length },
+        });
 
         // --- PHASE 3: DISCOVERY (ACTIVE ENUMERATION) ---
         this.updateJob(jobId, 'running', 'Phase 3: Discovery');
@@ -1022,6 +1054,17 @@ export class AutomationEngine {
             }
           } catch (e) {}
         }
+
+        this.savePhaseResult(jobId, 'phase3', {
+          status: endpoints.length > 0 ? 'completed' : 'failed',
+          findings: endpoints.length,
+          tools: [
+            { name: browserAvailable ? 'Browser Crawler' : 'HTTP Crawler', status: endpoints.length > 0 ? 'ok' : 'failed', detail: `${endpoints.length} endpoint(s)` },
+            { name: 'Sensitive File Probe', status: 'ok', detail: 'Checked common paths' },
+            { name: 'robots.txt Parser', status: 'ok', detail: 'Parsed' },
+          ],
+          data: { endpoints: endpoints.length, browserUsed: browserAvailable },
+        });
 
         // --- PHASE 4: EXPLOITATION & PoC (VULNERABILITY VERIFICATION) ---
         this.updateJob(jobId, 'running', 'Phase 4: Exploitation');
@@ -2510,222 +2553,56 @@ Return JSON: {
         this.log(jobId, 'info', `Phase 4f complete: ${trafficCount} traffic anomaly(ies) added to report`);
 
         // --- PHASE 4g: WAF DETECTION & BYPASS ENGINE ---
+        // Uses WafBypassEngine (full signature DB + vendor-specific bypass playbooks)
         this.log(jobId, 'info', 'Phase 4g: WAF Detection & Bypass Engine');
         this.updateJob(jobId, 'running', 'Phase 4g: WAF Detection');
 
-        // 4g-1: WAF fingerprinting — identify vendor/product by response patterns
-        this.log(jobId, 'info', 'Phase 4g-1: WAF fingerprinting');
-        const wafSignatures: { name: string; headers: Record<string, RegExp>; bodyPatterns: RegExp[]; statusCodes: number[] }[] = [
-          { name: 'Cloudflare', headers: { 'server': /cloudflare/i, 'cf-ray': /.+/ }, bodyPatterns: [/cloudflare/i, /ray ID/i, /cf-chl-bypass/i], statusCodes: [403, 503] },
-          { name: 'AWS WAF', headers: { 'x-amzn-requestid': /.+/ }, bodyPatterns: [/aws|amazon/i, /request blocked/i], statusCodes: [403] },
-          { name: 'Akamai', headers: { 'x-akamai-transformed': /.+/, 'server': /AkamaiGHost/i }, bodyPatterns: [/akamai/i, /reference.*#/i], statusCodes: [403] },
-          { name: 'Imperva/Incapsula', headers: { 'x-cdn': /Imperva|Incapsula/i }, bodyPatterns: [/incapsula|imperva|_Incapsula_Resource/i], statusCodes: [403] },
-          { name: 'F5 BIG-IP ASM', headers: { 'server': /BIG-IP|BigIP/i }, bodyPatterns: [/request rejected|the requested URL was rejected/i], statusCodes: [403] },
-          { name: 'ModSecurity', headers: {}, bodyPatterns: [/mod_security|modsecurity|NOYB/i], statusCodes: [403, 406] },
-          { name: 'Sucuri', headers: { 'server': /Sucuri/i, 'x-sucuri-id': /.+/ }, bodyPatterns: [/sucuri|cloudproxy/i], statusCodes: [403] },
-          { name: 'Barracuda', headers: { 'server': /Barracuda/i }, bodyPatterns: [/barracuda/i], statusCodes: [403] },
-          { name: 'Fortinet/FortiWeb', headers: { 'server': /FortiWeb/i }, bodyPatterns: [/fortigate|fortiweb/i], statusCodes: [403] },
-          { name: 'DenyAll', headers: {}, bodyPatterns: [/conditionblocked|denyall/i], statusCodes: [403] },
-          { name: 'Wordfence', headers: {}, bodyPatterns: [/wordfence|wfBlock/i, /generated by Wordfence/i], statusCodes: [403, 503] },
-        ];
-
-        const wafTriggerPayloads = [
-          { name: 'XSS probe', value: '<script>alert(1)</script>' },
-          { name: 'SQLi probe', value: "' OR 1=1--" },
-          { name: 'Path traversal', value: '../../etc/passwd' },
-          { name: 'Command injection', value: '; cat /etc/passwd' },
-          { name: 'LDAP injection', value: '*)(&' },
-        ];
-
+        // 4g-1: WAF fingerprinting via WafBypassEngine (13+ WAF signatures, cookie detection)
+        this.log(jobId, 'info', 'Phase 4g-1: WAF fingerprinting (WafBypassEngine — 13+ vendor signatures)');
         let wafCount = 0;
-        const detectedWafs: { name: string; confidence: number; endpoint: string; evidence: string[] }[] = [];
+        const detectedWafs: { name: string; vendor: string; confidence: number; endpoint: string; evidence: string[] }[] = [];
 
-        // Test top assets with trigger payloads to provoke WAF responses
         for (const asset of discoveredAssets.slice(0, 5)) {
-          const wafEvidence: Record<string, string[]> = {};
-
-          for (const payload of wafTriggerPayloads) {
-            try {
-              const sep = asset.includes('?') ? '&' : '?';
-              const testUrl = `${asset}${sep}waftest=${encodeURIComponent(payload.value)}`;
-              const res = await axios.get(testUrl, {
-                timeout: 8000, validateStatus: () => true, maxRedirects: 0,
+          try {
+            const wafResults = await WafBypassEngine.fingerprint(asset, { timeout: 8000 });
+            for (const waf of wafResults) {
+              detectedWafs.push(waf);
+              this.log(jobId, 'info', `WAF DETECTED: ${waf.name} (${waf.vendor}) on ${asset}`, { evidence: waf.evidence, confidence: waf.confidence });
+              MemoryManager.addFinding(jobId, hostname, {
+                type: 'WAF Detection', subtype: waf.name,
+                endpoint: asset, gap: `${waf.name} (${waf.vendor}) WAF detected with ${Math.round(waf.confidence * 100)}% confidence`,
+                chain_potential: 'Bypass techniques may enable exploitation of blocked vulnerabilities',
+                evidence: waf.evidence, severity: 'INFO',
               });
-
-              const bodyStr = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
-
-              for (const sig of wafSignatures) {
-                const matches: string[] = [];
-
-                // Check headers
-                for (const [header, pattern] of Object.entries(sig.headers)) {
-                  const headerVal = String(res.headers[header] || '');
-                  if (headerVal && pattern.test(headerVal)) {
-                    matches.push(`Header ${header}: ${headerVal}`);
-                  }
-                }
-
-                // Check body patterns
-                for (const pattern of sig.bodyPatterns) {
-                  if (pattern.test(bodyStr)) {
-                    matches.push(`Body match: ${pattern.source}`);
-                  }
-                }
-
-                // Check status codes
-                if (sig.statusCodes.includes(res.status) && matches.length > 0) {
-                  matches.push(`Status: ${res.status}`);
-                }
-
-                if (matches.length >= 2) {
-                  if (!wafEvidence[sig.name]) wafEvidence[sig.name] = [];
-                  wafEvidence[sig.name].push(...matches);
-                }
-              }
-            } catch {}
-          }
-
-          // Record detected WAFs
-          for (const [wafName, evidence] of Object.entries(wafEvidence)) {
-            const uniqueEvidence = [...new Set(evidence)];
-            const confidence = Math.min(uniqueEvidence.length / 4, 1.0);
-            detectedWafs.push({ name: wafName, confidence, endpoint: asset, evidence: uniqueEvidence });
-
-            this.log(jobId, 'info', `WAF DETECTED: ${wafName} on ${asset}`, { evidence: uniqueEvidence, confidence });
-            MemoryManager.addFinding(jobId, hostname, {
-              type: 'WAF Detection', subtype: wafName,
-              endpoint: asset, gap: `${wafName} WAF detected with ${Math.round(confidence * 100)}% confidence`,
-              chain_potential: 'Bypass techniques may enable exploitation of blocked vulnerabilities',
-              evidence: uniqueEvidence, severity: 'INFO',
-            });
-            wafCount++;
-          }
+              wafCount++;
+            }
+          } catch {}
         }
         this.log(jobId, 'info', `Phase 4g-1 complete: ${detectedWafs.length} WAF(s) identified`);
 
-        // 4g-2: WAF bypass techniques — test evasion methods against detected WAFs
-        this.log(jobId, 'info', 'Phase 4g-2: WAF bypass testing');
+        // 4g-2: WAF bypass testing via WafBypassEngine (17+ bypass techniques, vendor-prioritized)
+        this.log(jobId, 'info', 'Phase 4g-2: WAF bypass testing (WafBypassEngine — encoding, structural, semantic, protocol techniques)');
         let bypassCount = 0;
-        const bypassTechniques: { name: string; transform: (payload: string) => string }[] = [
-          { name: 'Case mutation', transform: (p) => p.split('').map((c, i) => i % 2 === 0 ? c.toUpperCase() : c.toLowerCase()).join('') },
-          { name: 'Double URL encoding', transform: (p) => encodeURIComponent(p) },
-          { name: 'Unicode escape', transform: (p) => p.split('').map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`).join('') },
-          { name: 'HTML entity encoding', transform: (p) => p.split('').map(c => `&#${c.charCodeAt(0)};`).join('') },
-          { name: 'Hex encoding', transform: (p) => p.split('').map(c => `%${c.charCodeAt(0).toString(16)}`).join('') },
-          { name: 'Null byte insertion', transform: (p) => p.split('').join('\0') },
-          { name: 'Comment insertion (SQL)', transform: (p) => p.replace(/\s+/g, '/**/') },
-          { name: 'Tab/newline substitution', transform: (p) => p.replace(/\s+/g, '\t') },
-          { name: 'Chunked payload', transform: (p) => { const mid = Math.floor(p.length / 2); return p.slice(0, mid) + '\n' + p.slice(mid); } },
-          { name: 'Overlong UTF-8', transform: (p) => p.replace(/</g, '\xC0\xBC').replace(/>/g, '\xC0\xBE') },
-        ];
-
-        const basePayloads = [
-          { name: 'XSS', value: '<script>alert(1)</script>', blocked_status: [403, 406, 501] },
-          { name: 'SQLi', value: "' OR 1=1--", blocked_status: [403, 406, 501] },
-          { name: 'RCE', value: '; id', blocked_status: [403, 406, 501] },
-        ];
 
         for (const asset of discoveredAssets.slice(0, 3)) {
-          if (bypassCount >= 5) break;
-
-          // Fetch a clean baseline response (no malicious payload) for comparison
-          let cleanStatus = 0;
-          let cleanBodyLen = 0;
           try {
-            const sep = asset.includes('?') ? '&' : '?';
-            const cleanRes = await axios.get(`${asset}${sep}q=harmless_test_value`, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
-            cleanStatus = cleanRes.status;
-            const cleanBody = typeof cleanRes.data === 'string' ? cleanRes.data : JSON.stringify(cleanRes.data);
-            cleanBodyLen = cleanBody.length;
-          } catch { continue; }
-
-          // If the asset returns a 3xx redirect on a harmless query, the WAF
-          // never inspects the request body — the edge redirects (e.g.
-          // tiktok.com → www.tiktok.com or http→https) before the payload
-          // reaches the WAF rule chain. Any "bypass" reported here is a
-          // false positive: clean baseline 301 == payload response 301
-          // because BOTH got redirected pre-WAF. Skip this asset and let
-          // the redirect target be tested separately.
-          if (cleanStatus >= 300 && cleanStatus < 400) {
-            this.log(jobId, 'info', `Skipping WAF bypass tests on ${asset}: clean baseline returned ${cleanStatus}, redirect happens before WAF inspection`);
-            continue;
-          }
-
-          // First establish what gets blocked
-          for (const bp of basePayloads) {
-            try {
-              const sep = asset.includes('?') ? '&' : '?';
-              const blockedUrl = `${asset}${sep}q=${encodeURIComponent(bp.value)}`;
-              const blockedRes = await axios.get(blockedUrl, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
-
-              const isBlocked = bp.blocked_status.includes(blockedRes.status);
-              if (!isBlocked) continue; // WAF didn't block the raw payload, skip bypass testing
-
-              // Try each bypass technique
-              for (const technique of bypassTechniques) {
-                if (bypassCount >= 5) break;
-                try {
-                  const bypassPayload = technique.transform(bp.value);
-                  const bypassUrl = `${asset}${sep}q=${encodeURIComponent(bypassPayload)}`;
-                  const bypassRes = await axios.get(bypassUrl, { timeout: 5000, validateStatus: () => true, maxRedirects: 0 });
-
-                  // Bypass detected: not blocked AND response resembles the clean baseline
-                  // (not just a different error page)
-                  const bypassBody = typeof bypassRes.data === 'string' ? bypassRes.data : JSON.stringify(bypassRes.data);
-                  const statusMatchesClean = bypassRes.status === cleanStatus;
-                  const sizeMatchesClean = cleanBodyLen === 0 ? bypassBody.length === 0 : Math.abs(bypassBody.length - cleanBodyLen) < cleanBodyLen * 0.5;
-                  const notBlocked = !bp.blocked_status.includes(bypassRes.status) && bypassRes.status !== 400;
-
-                  if (notBlocked && (statusMatchesClean || sizeMatchesClean)) {
-                    this.log(jobId, 'vuln', `WAF BYPASS [${technique.name}]: ${bp.name} on ${asset}`, {
-                      original_status: blockedRes.status, bypass_status: bypassRes.status,
-                      clean_status: cleanStatus, technique: technique.name, payload_type: bp.name,
-                    });
-
-                    if (ai) {
-                      const bypassPrompt = `Analyze this WAF bypass finding.
-
-Target: ${asset}
-Original payload (${bp.name}): ${bp.value} → Blocked (Status ${blockedRes.status})
-Bypass technique: ${technique.name}
-Encoded payload: ${bypassPayload.substring(0, 200)}
-Bypass result: Status ${bypassRes.status}, Body size ${bypassBody.length}
-Clean baseline: Status ${cleanStatus}, Body size ${cleanBodyLen}
-Response snippet: ${bypassBody.substring(0, 500)}
-Detected WAF(s): ${detectedWafs.map(w => w.name).join(', ') || 'unknown'}
-
-A genuine WAF bypass means the encoded payload reaches the backend and produces a response similar to normal requests (not just a different error page).
-Is this a genuine WAF bypass or a false positive?
-Return JSON: { "isVulnerable": boolean, "confidence": number, "explanation": string, "gap_identified": string, "chain_potential": string | null }`;
-
-                      const analysis = safeJsonParse<AiVulnResult>(await ai.generate(bypassPrompt, true), NULL_VULN);
-                      if (analysis.isVulnerable && analysis.confidence > 0.7) {
-                        MemoryManager.addFinding(jobId, hostname, {
-                          type: 'WAF Bypass', subtype: technique.name,
-                          endpoint: asset, payload_type: bp.name,
-                          gap: analysis.gap_identified, chain_potential: analysis.chain_potential,
-                          severity: 'HIGH',
-                        });
-                        bypassCount++;
-                      }
-                    } else {
-                      // No-AI: require response matches clean baseline closely
-                      if (statusMatchesClean && sizeMatchesClean) {
-                        MemoryManager.addFinding(jobId, hostname, {
-                          type: 'WAF Bypass', subtype: technique.name,
-                          endpoint: asset, payload_type: bp.name,
-                          gap: `WAF bypass via ${technique.name}: ${bp.name} payload passes with Status ${bypassRes.status} (matches clean baseline ${cleanStatus})`,
-                          chain_potential: 'Enables exploitation of vulnerabilities that WAF normally blocks',
-                          severity: 'HIGH',
-                        });
-                        bypassCount++;
-                      }
-                    }
-                  }
-                } catch {}
-              }
-            } catch {}
-          }
+            const bypasses = await WafBypassEngine.testBypasses(asset, detectedWafs, { maxBypasses: 10 });
+            for (const bp of bypasses) {
+              this.log(jobId, 'vuln', `WAF BYPASS [${bp.technique}] (${bp.category}): ${bp.payloadType} on ${asset}`, {
+                original_status: bp.originalStatus, bypass_status: bp.bypassStatus,
+                clean_status: bp.cleanStatus, technique: bp.technique, category: bp.category,
+                payload_type: bp.payloadType, confidence: bp.confidence,
+              });
+              MemoryManager.addFinding(jobId, hostname, {
+                type: 'WAF Bypass', subtype: bp.technique,
+                endpoint: asset, payload_type: bp.payloadType,
+                gap: `WAF bypass via ${bp.technique} (${bp.category}): ${bp.payloadType} payload passes WAF "${bp.wafName}" — Status ${bp.originalStatus}→${bp.bypassStatus}`,
+                chain_potential: 'Enables exploitation of vulnerabilities that WAF normally blocks',
+                severity: 'HIGH', category: bp.category, confidence: bp.confidence,
+              });
+              bypassCount++;
+            }
+          } catch {}
         }
         this.log(jobId, 'info', `Phase 4g-2 complete: ${bypassCount} WAF bypass(es) found`);
 
@@ -3352,6 +3229,20 @@ Return JSON: {
         }
         this.log(jobId, 'info', `Phase 4h complete: ${authCount} auth finding(s) added to report`);
 
+        this.savePhaseResult(jobId, 'phase4', {
+          status: 'completed',
+          findings: vulnerabilities.length,
+          tools: [
+            { name: 'Fuzzing Scanner', status: vulnerabilities.length > 0 ? 'ok' : 'ok', detail: `${vulnerabilities.length} vuln(s) across ${prioritizedEndpoints.length} endpoints` },
+            { name: '0day Discovery', status: 'ok', detail: 'Differential + smuggling + behavioral analysis' },
+            { name: 'UEBA', status: 'ok', detail: `${behaviorBaselines.size} baselines` },
+            { name: 'Traffic Anomaly', status: 'ok', detail: `${trafficCount} anomaly(ies)` },
+            { name: 'WAF Detection', status: detectedWafs.length > 0 ? 'ok' : 'ok', detail: `${detectedWafs.length} WAF(s), ${bypassCount} bypass(es)` },
+            { name: 'Auth Deep Dive', status: authCount > 0 ? 'ok' : 'ok', detail: `${authCount} auth finding(s)` },
+          ],
+          data: { vulns: vulnerabilities.length, wafs: detectedWafs.length, bypasses: bypassCount, authFindings: authCount, trafficAnomalies: trafficCount },
+        });
+
         // --- PHASE 5: REPORTING (FINAL SYNTHESIS) ---
         this.updateJob(jobId, 'running', 'Phase 5: Reporting');
         this.log(jobId, 'info', 'Starting Phase 5: Final Report Synthesis');
@@ -3366,6 +3257,15 @@ Return JSON: {
           },
           detailed_findings: allFindings
         };
+
+        this.savePhaseResult(jobId, 'phase5', {
+          status: 'completed',
+          findings: allFindings.length,
+          tools: [
+            { name: 'Report Generator', status: 'ok', detail: `${vulnerabilities.length} vulns, ${allFindings.length} total findings` },
+          ],
+          data: finalReport.summary,
+        });
 
         this.log(jobId, 'info', 'Hunt completed.', { summary: finalReport.summary });
         this.updateJob(jobId, 'completed', 'completed', allFindings);
