@@ -7,7 +7,7 @@ import { v4 as uuidv4 } from 'uuid';
 import axios from 'axios';
 import { createServer as createViteServer } from 'vite';
 import { execSync } from 'child_process';
-import { readFileSync } from 'fs';
+import fs from 'fs';
 import db from './db.js';
 import { StackGapAnalyzer } from './stack_gap_analyzer.js';
 import { AutomationEngine } from './automation_engine.js';
@@ -2379,9 +2379,15 @@ async function startServer() {
     res.json(logs.map((l: any) => ({ ...l, data: l.data ? JSON.parse(l.data) : null })));
   });
 
-  // --- Subdomain Enumeration (standalone) ---
+  // --- Subdomain Enumeration (standalone — 3 tools in parallel + dedup + probe + screenshots) ---
+
+  // Screenshot storage
+  const SCREENSHOT_DIR = path.join(process.env.LEVARG_TOOLS_HOME || path.join(process.env.HOME || '/root', '.levarg'), 'screenshots');
+  if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+  app.use('/api/screenshots', express.static(SCREENSHOT_DIR));
+
   app.post('/api/subdomains/enumerate', async (req, res) => {
-    const { domain, wordlistSize } = req.body as { domain: string; wordlistSize?: number };
+    const { domain, wordlistSize, takeScreenshots } = req.body as { domain: string; wordlistSize?: number; takeScreenshots?: boolean };
     if (!domain) return res.status(400).json({ error: 'domain is required' });
 
     const hostname = domain.replace(/^https?:\/\//, '').split('/')[0].split(':')[0].replace(/^\*\./, '').replace(/\.+$/, '');
@@ -2389,47 +2395,208 @@ async function startServer() {
     const baseDomain = domainParts.length > 2 ? domainParts.slice(-2).join('.') : hostname;
     const maxSubs = Math.min(wordlistSize || 200, 500);
 
-    const results: { subdomain: string; status: number | null; title: string | null; ip: string | null }[] = [];
+    // ── Tool 1: subfinder (passive, uses APIs: crt.sh, virustotal, shodan, etc.) ──
+    const tool1_subfinder = async (): Promise<{ source: string; subs: string[] }> => {
+      try {
+        const result = await ToolManager.execute('subfinder', ['-d', baseDomain, '-silent', '-all'], 'subdomain-enum',
+          async () => {
+            // Polyfill: crt.sh + hackertarget + rapiddns
+            const subs = new Set<string>();
+            // crt.sh
+            try {
+              const crtRes = await axios.get(`https://crt.sh/?q=%25.${baseDomain}&output=json`, { timeout: 15000 });
+              if (Array.isArray(crtRes.data)) {
+                for (const entry of crtRes.data) {
+                  const cn = String(entry.common_name || entry.name_value || '').toLowerCase();
+                  cn.split('\n').forEach((n: string) => {
+                    const trimmed = n.trim().replace(/^\*\./, '');
+                    if (trimmed.endsWith(baseDomain) && trimmed !== baseDomain) subs.add(trimmed);
+                  });
+                }
+              }
+            } catch {}
+            // hackertarget
+            try {
+              const htRes = await axios.get(`https://api.hackertarget.com/hostsearch/?q=${baseDomain}`, { timeout: 10000 });
+              if (typeof htRes.data === 'string') {
+                htRes.data.split('\n').forEach((line: string) => {
+                  const host = line.split(',')[0]?.trim().toLowerCase();
+                  if (host && host.endsWith(baseDomain) && host !== baseDomain) subs.add(host);
+                });
+              }
+            } catch {}
+            // rapiddns
+            try {
+              const rdRes = await axios.get(`https://rapiddns.io/subdomain/${baseDomain}?full=1`, { timeout: 10000 });
+              if (typeof rdRes.data === 'string') {
+                const matches = rdRes.data.match(/([a-z0-9][-a-z0-9]*\.)+[a-z]{2,}/gi) || [];
+                matches.forEach((m: string) => {
+                  const h = m.toLowerCase();
+                  if (h.endsWith(baseDomain) && h !== baseDomain) subs.add(h);
+                });
+              }
+            } catch {}
+            return { stdout: Array.from(subs).join('\n'), stderr: '' };
+          }
+        );
+        const lines = (result.stdout || '').split('\n').map((l: string) => l.trim().toLowerCase()).filter((l: string) => l.length > 0 && l.endsWith(baseDomain));
+        return { source: 'subfinder', subs: lines };
+      } catch { return { source: 'subfinder', subs: [] }; }
+    };
 
-    // Passive: try crt.sh certificate transparency
-    try {
-      const crtRes = await axios.get(`https://crt.sh/?q=%25.${baseDomain}&output=json`, { timeout: 10000 });
-      if (Array.isArray(crtRes.data)) {
-        const names = new Set<string>();
-        for (const entry of crtRes.data) {
-          const cn = String(entry.common_name || entry.name_value || '').toLowerCase();
-          cn.split('\n').forEach((n: string) => {
-            const trimmed = n.trim().replace(/^\*\./, '');
-            if (trimmed.endsWith(baseDomain) && trimmed !== baseDomain) names.add(trimmed);
-          });
+    // ── Tool 2: SecLists DNS brute-force (active, DNS resolution) ──
+    const tool2_bruteforce = async (): Promise<{ source: string; subs: string[] }> => {
+      try {
+        const result = await ToolManager.polyfillSubdomainDiscovery(baseDomain, maxSubs);
+        const lines = (result.stdout || '').split('\n').map((l: string) => l.trim().toLowerCase()).filter((l: string) => l.length > 0);
+        return { source: 'brute-force', subs: lines };
+      } catch { return { source: 'brute-force', subs: [] }; }
+    };
+
+    // ── Tool 3: gau + wayback (passive OSINT — historical URLs → extract subdomains) ──
+    const tool3_osint = async (): Promise<{ source: string; subs: string[] }> => {
+      const subs = new Set<string>();
+      try {
+        // Try gau binary first
+        const gauResult = await ToolManager.execute('gau', ['--subs', baseDomain], 'subdomain-enum',
+          async () => {
+            // Polyfill: web.archive.org CDX API
+            try {
+              const wbRes = await axios.get(`https://web.archive.org/cdx/search/cdx?url=*.${baseDomain}&output=json&fl=original&collapse=urlkey&limit=500`, { timeout: 15000 });
+              if (Array.isArray(wbRes.data)) {
+                for (const row of wbRes.data.slice(1)) { // skip header row
+                  try {
+                    const u = new URL(String(row[0]));
+                    const h = u.hostname.toLowerCase();
+                    if (h.endsWith(baseDomain) && h !== baseDomain) subs.add(h);
+                  } catch {}
+                }
+              }
+            } catch {}
+            return { stdout: Array.from(subs).join('\n'), stderr: '' };
+          }
+        );
+        const lines = (gauResult.stdout || '').split('\n');
+        for (const line of lines) {
+          try {
+            const h = line.includes('://') ? new URL(line.trim()).hostname.toLowerCase() : line.trim().toLowerCase();
+            if (h.endsWith(baseDomain) && h !== baseDomain) subs.add(h);
+          } catch {}
         }
-        for (const name of Array.from(names).slice(0, 100)) {
-          results.push({ subdomain: name, status: null, title: null, ip: null });
-        }
-      }
-    } catch {}
+      } catch {}
+      return { source: 'osint', subs: Array.from(subs) };
+    };
 
-    // Active: brute-force common subdomains
-    const { getSubdomains } = await import('./seclists.js');
-    const subPrefixes = getSubdomains(maxSubs);
-    const batchSize = 30;
+    // ── Run all 3 tools in parallel ──
+    const [r1, r2, r3] = await Promise.all([tool1_subfinder(), tool2_bruteforce(), tool3_osint()]);
 
-    for (let i = 0; i < subPrefixes.length; i += batchSize) {
-      const batch = subPrefixes.slice(i, i + batchSize);
-      const batchResults = await Promise.all(batch.map(async (sub) => {
-        const subDomain = `${sub}.${baseDomain}`;
-        if (results.some(r => r.subdomain === subDomain)) return null;
-        try {
-          const subRes = await axios.get(`https://${subDomain}`, { timeout: 3000, validateStatus: () => true, maxRedirects: 2 });
-          const bodyStr = typeof subRes.data === 'string' ? subRes.data : '';
-          const title = (bodyStr.match(/<title>(.*?)<\/title>/i) || [])[1] || null;
-          return { subdomain: subDomain, status: subRes.status, title, ip: null };
-        } catch { return null; }
-      }));
-      for (const r of batchResults) if (r) results.push(r);
+    // ── Deduplicate into single container ──
+    const allSubs = new Set<string>();
+    const sourceMap: Record<string, string[]> = {};
+    for (const r of [r1, r2, r3]) {
+      sourceMap[r.source] = r.subs;
+      for (const s of r.subs) allSubs.add(s);
     }
 
-    res.json({ domain: baseDomain, total: results.length, subdomains: results });
+    // ── HTTP probe all subdomains (httpx or polyfill) ──
+    const probed: {
+      subdomain: string;
+      status: number | null;
+      title: string | null;
+      ip: string | null;
+      contentLength: number | null;
+      tech: string[];
+      sources: string[];
+      screenshotPath: string | null;
+    }[] = [];
+
+    const subList = Array.from(allSubs);
+    const probeBatchSize = 25;
+
+    for (let i = 0; i < subList.length; i += probeBatchSize) {
+      const batch = subList.slice(i, i + probeBatchSize);
+      const batchResults = await Promise.all(batch.map(async (sub) => {
+        const sources = Object.entries(sourceMap).filter(([, subs]) => subs.includes(sub)).map(([src]) => src);
+        try {
+          const probeRes = await axios.get(`https://${sub}`, {
+            timeout: 5000, validateStatus: () => true, maxRedirects: 3,
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+          });
+          const bodyStr = typeof probeRes.data === 'string' ? probeRes.data : JSON.stringify(probeRes.data || '');
+          const title = (bodyStr.match(/<title[^>]*>(.*?)<\/title>/i) || [])[1]?.trim() || null;
+          const tech: string[] = [];
+          const server = String(probeRes.headers['server'] || '');
+          if (server) tech.push(server);
+          const powered = String(probeRes.headers['x-powered-by'] || '');
+          if (powered) tech.push(powered);
+
+          return {
+            subdomain: sub, status: probeRes.status, title,
+            ip: null, contentLength: bodyStr.length, tech, sources, screenshotPath: null,
+          };
+        } catch {
+          // Try HTTP if HTTPS failed
+          try {
+            const httpRes = await axios.get(`http://${sub}`, {
+              timeout: 4000, validateStatus: () => true, maxRedirects: 3,
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+            });
+            const bodyStr = typeof httpRes.data === 'string' ? httpRes.data : '';
+            const title = (bodyStr.match(/<title[^>]*>(.*?)<\/title>/i) || [])[1]?.trim() || null;
+            return { subdomain: sub, status: httpRes.status, title, ip: null, contentLength: bodyStr.length, tech: [], sources, screenshotPath: null };
+          } catch {
+            return { subdomain: sub, status: null, title: null, ip: null, contentLength: null, tech: [], sources, screenshotPath: null };
+          }
+        }
+      }));
+      probed.push(...batchResults);
+    }
+
+    // ── Screenshots (headless Chrome via puppeteer) ──
+    let screenshotCount = 0;
+    if (takeScreenshots) {
+      const liveTargets = probed.filter(p => p.status !== null && p.status >= 200 && p.status < 500).slice(0, 50);
+      try {
+        const puppeteerModule = await import('puppeteer-extra');
+        const stealthModule = await import('puppeteer-extra-plugin-stealth');
+        puppeteerModule.default.use(stealthModule.default());
+        const browser = await puppeteerModule.default.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+        });
+
+        for (const target of liveTargets) {
+          try {
+            const page = await browser.newPage();
+            await page.setViewport({ width: 1280, height: 720 });
+            await page.goto(`https://${target.subdomain}`, { waitUntil: 'domcontentloaded', timeout: 8000 }).catch(() =>
+              page.goto(`http://${target.subdomain}`, { waitUntil: 'domcontentloaded', timeout: 8000 })
+            );
+            const filename = `${target.subdomain.replace(/[^a-z0-9.-]/gi, '_')}.png`;
+            const filepath = path.join(SCREENSHOT_DIR, filename);
+            await page.screenshot({ path: filepath, type: 'png' });
+            target.screenshotPath = `/api/screenshots/${filename}`;
+            screenshotCount++;
+            await page.close();
+          } catch {}
+        }
+        await browser.close();
+      } catch {}
+    }
+
+    res.json({
+      domain: baseDomain,
+      total: probed.length,
+      live: probed.filter(p => p.status !== null).length,
+      screenshotsTaken: screenshotCount,
+      tools: {
+        subfinder: { found: r1.subs.length, source: 'subfinder (passive — crt.sh, virustotal, shodan APIs)' },
+        bruteforce: { found: r2.subs.length, source: `SecLists DNS brute-force (top ${maxSubs})` },
+        osint: { found: r3.subs.length, source: 'gau + wayback (historical URL mining)' },
+      },
+      duplicatesRemoved: (r1.subs.length + r2.subs.length + r3.subs.length) - subList.length,
+      subdomains: probed.sort((a, b) => (b.status ?? 0) - (a.status ?? 0)),
+    });
   });
 
   // --- WAF Bypass Techniques List ---
@@ -2632,7 +2799,7 @@ async function startServer() {
   // --- Upgrade / About API ---
   const getLocalVersion = (): string => {
     try {
-      const pkg = JSON.parse(readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
+      const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'package.json'), 'utf-8'));
       return pkg.version || '0.0.0';
     } catch {
       return '0.0.0';
